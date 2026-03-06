@@ -11,3 +11,6 @@ Script authors: Jenna Frey (jfrey@unc.edu) and Allison Spring (aspring@unc.edu)
 * 1_Data
 * 2_OutputGraphs
 * 3_OutputTables
+
+**Example Figure**
+![figure2](https://github.com/user-attachments/assets/da18bfe3-bb81-48fb-b9af-70b1dabdcfcd)
