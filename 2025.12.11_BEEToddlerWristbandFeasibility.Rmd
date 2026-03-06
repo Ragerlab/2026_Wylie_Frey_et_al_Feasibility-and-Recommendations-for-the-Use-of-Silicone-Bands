@@ -1,0 +1,3468 @@
+---
+title: "BEE_Toddler Feasibility"
+author: "Jenna Frey"
+date: "started 2025-02-07"
+output: html_document
+---
+
+# FILE SET UP 
+## a. Loading libraries and data import
+```{r}
+
+# Load packages (list from Elise)
+library(openxlsx) # for reading and writing out files
+library(table1) # for making tables
+library(tidyverse) # for data organization and manipulation
+library(ggpubr)  # plots
+library(rstatix) # tukeys
+library(ltm) # cronbach's alpha
+library(FSA) # dunns test
+library(patchwork) # for combining graphs
+library(ggtext)
+library(compareGroups)
+# for random forest
+library(lubridate)
+library(caret)
+library(randomForest)
+library(e1071)
+library(ggsci)
+library(themis)
+library(this.path)
+
+
+select <- dplyr::select
+rename <- dplyr::rename
+
+# set working directory 
+setwd(this.dir())
+
+# main data import
+data <- read.csv("1_Data/2025_1217_BEE_toddlerband_feasibility.csv")
+
+# qualitative additions from the band diary 
+issues <- read.xlsx("1_Data/QualCode.xlsx")
+
+```
+
+## b. Filtering only BEE participants who participated in the band activity
+```{r}
+
+bands <- data %>% 
+  filter(bwb_diaryret_T30==1)
+  
+```
+
+## c. Exploring missingness of the outcome (wear time)
+```{r}
+
+# of participants who completed the band visit, who did not return a wrist band?
+bands %>% count(bwb_cwret_T30)
+#10
+
+# of participants who completed the band visit, who did not return an ankle band?
+bands %>% count(bwb_caret_T30)
+# 10, 9(==0) and 1(NA)
+
+# of participants who completed the band visit, who did not return both?
+bands %>% count(bwb_caret_T30==0 & bwb_cwret_T30==0)
+# 6 did not return both bands, 1 had NA responses for both wrist and ankle
+
+# what is the missingness in entire cohort?
+all_na <- c(sapply(data, function(x) sum(is.na(x))))
+all_vars <- c(names(data))
+all_na <- data.frame(all_vars, all_na)
+
+# what is the missingness only among band participants?
+band_na <- c(sapply(bands, function(x) sum(is.na(x))))
+band_vars <- c(names(bands))
+band_na <- data.frame(band_vars, band_na)
+
+# what is the missingness by participant?
+bands_indiv_na <- bands %>% 
+  rowwise() %>% 
+  mutate(var_na=sum(is.na(c_across(bwb_cwret_T30:bwb_pwhrsnitetime7_T30)))) %>% 
+  select(S_ID, var_na)
+
+# participant 1023 has missing values for 83 of total columns
+
+# removal of participants who opted out or were missing >75% of data
+bands <- bands %>% 
+  filter(!S_ID== 1015, # child opted out
+         !S_ID== 1023, # missingness shown above
+         !S_ID== 1097) # child opted out
+
+# this give a baseline analytical sample size of n=115
+
+```
+
+## d. Setting up dfs
+###  1. totals
+###  2. separate dfs for each person/band position
+###  3. attributes and wear time 
+```{r}
+# for total, day, and night wear over the week 
+wksumwear <- bands %>% 
+  select(S_ID, bwb_cwhrsweek_T30, bwb_cwhrsweekday_T30, bwb_cwhrsweeknite_T30, bwb_cahrsweek_T30, bwb_cahrsweekday_T30, bwb_cahrsweeknite_T30, bwb_pwhrsweek_T30, bwb_pwhrsweekday_T30,
+bwb_pwhrsweeknite_T30) %>% 
+  rename("child_wrist_wktotal" ="bwb_cwhrsweek_T30",
+         "child_wrist_daytotal" = "bwb_cwhrsweekday_T30",
+         "child_wrist_nighttotal" = "bwb_cwhrsweeknite_T30",
+         "child_ankle_wktotal" = "bwb_cahrsweek_T30",
+         "child_ankle_daytotal" = "bwb_cahrsweekday_T30",
+         "child_ankle_nighttotal" = "bwb_cahrsweeknite_T30",
+         "parent_parentwrist_wktotal" = "bwb_pwhrsweek_T30",
+         "parent_parentwrist_daytotal" = "bwb_pwhrsweekday_T30", 
+         "parent_parentwrist_nighttotal" = "bwb_pwhrsweeknite_T30") %>% 
+  pivot_longer(-S_ID, names_to="longname", values_to="hours") %>% 
+  separate(longname, c("person", "position", "day"), sep="_")
+
+# separate dfs by person (child, adult) and position (wrist,ankle)
+wksum_child_wrist <- wksumwear %>% 
+  filter(person == "child", position == "wrist")
+
+wksum_child_ankle <- wksumwear %>% 
+  filter(person == "child", position == "ankle")
+
+wksum_adult <- wksumwear %>% 
+  filter(person == "parent")
+
+
+# df of child attributes and weartime totals
+attributes_weartimetotals <- bands %>% 
+  rename("child_wrist_wktotal" = "bwb_cwhrsweek_T30",
+       "child_wrist_daytotal" = "bwb_cwhrsweekday_T30",
+       "child_wrist_nighttotal" = "bwb_cwhrsweeknite_T30",
+       "child_ankle_wktotal" = "bwb_cahrsweek_T30",
+       "child_ankle_daytotal" = "bwb_cahrsweekday_T30",
+       "child_ankle_nighttotal" = "bwb_cahrsweeknite_T30",
+       "parent_parentwrist_wktotal" = "bwb_pwhrsweek_T30",
+       "parent_parentwrist_daytotal" = "bwb_pwhrsweekday_T30", 
+       "parent_parentwrist_nighttotal" = "bwb_pwhrsweeknite_T30") %>% 
+  select(S_ID, PSI_Mn_T30, PSI_DC_T30, MCDI3_All_T30, ECBQ_dis_T30, ECBQ_EFFCO_T30, ECBQ_NEGAF_T30, ECBQ_SURGE_T30, BIQ_Soc_T30, BIQ_Nov_T30, BIQ_Tot_T30, PAS_AVG_T30, child_wrist_wktotal, child_wrist_daytotal, child_ankle_wktotal, child_ankle_daytotal, child_ankle_nighttotal, parent_parentwrist_wktotal, parent_parentwrist_daytotal, parent_parentwrist_nighttotal) 
+
+```
+
+## e. Exploring missingness (attributes)
+```{r}
+#wear time and attribute data for ankle
+wk_child_ankle_attributes <- merge(wksum_child_ankle, attributes_weartimetotals, by="S_ID", all.x= TRUE) 
+
+#wear time and attribute data for wrist
+wk_child_wrist_attributes <- merge(wksum_child_wrist, attributes_weartimetotals, by="S_ID", all.x= TRUE) 
+
+wk_adult_attributes <- merge(wksum_adult, attributes_weartimetotals, by="S_ID", all.x= TRUE)
+
+#attributes only
+attributes <- wk_child_ankle_attributes %>% 
+  select(S_ID, PSI_Mn_T30:PAS_AVG_T30)
+
+#each participant was in the df 3 times
+attributes <- distinct(attributes)
+
+# missingness by attribute
+attribute_na <- c(sapply(attributes, function(x) sum(is.na(x))))
+attribute_vars <- c(names(attributes))
+attribute_na <- data.frame(attribute_vars, attribute_na) %>% 
+  rename("attribute"="attribute_na")
+
+# missingness by person
+attributes_indiv_na <- attributes %>% 
+  rowwise() %>% 
+  mutate(var_na=sum(is.na(c_across(PSI_Mn_T30:PAS_AVG_T30)))) %>% 
+  select(S_ID, var_na)
+
+  # 12 participants are missing all attributes
+
+```
+
+## f. Evaluating distributions / normality of attributes
+### -Histograms
+### -Shapiro Wilkes for normality
+### -QQ plots
+```{r}
+
+###### VISUAL ASSESSMENT
+
+# histograms
+attributes_long <- bands %>% 
+  select(S_ID, PSI_Mn_T30, PSI_DC_T30, MCDI3_All_T30, ECBQ_dis_T30, ECBQ_EFFCO_T30, ECBQ_NEGAF_T30, ECBQ_SURGE_T30, BIQ_Soc_T30, BIQ_Nov_T30, BIQ_Tot_T30, PAS_AVG_T30,) %>% 
+  pivot_longer(!S_ID, names_to="variable", values_to= "value")
+
+
+attribute_hist <- ggplot(attributes_long, aes(value)) + 
+  geom_histogram(fill="cornflowerblue", color= "black", binwidth= function(x) {(max(x)-min(x))/25}) +
+  facet_wrap(~ variable, scales= "free") +
+  labs( y = "Number of Observations", x= "Value", title= "Distributions of Child Attributes") 
+
+attribute_hist
+
+# qqplot 
+attribute_qqplot <- ggqqplot(attributes_long, x= "value", facet.by= "variable", ggtheme= theme_bw(), scales= "free")
+
+attribute_qqplot
+
+###### QUANTITATIVE ASSESSMENT
+
+#shapiro wilkes test  
+shapiro_attributes <- apply(attributes_weartimetotals %>% select(-S_ID), 2, shapiro.test)
+
+shapiro_attributes <- do.call(rbind.data.frame, shapiro_attributes)
+
+shapiro_attributes <- shapiro_attributes %>% 
+  mutate(normal = ifelse(p.value < 0.05, F, T)) %>%
+  select(c(p.value, normal)) 
+
+shapiro_attributes
+# normal distributions aside from PSI_DC, MCDI_ALL, ECBQ_Dis
+
+```
+
+## g. creating Table 1: Birthing parent and child demographic characteristics
+```{r}
+
+bands %>% count(tc_race)
+
+# checked with the BEE team, and the child missing race data is White, so we will manually change the missing value here: 
+bands <- bands %>% 
+  mutate(tc_race=ifelse(is.na(tc_race), 0, tc_race))
+
+bands %>% count(tc_race)
+
+
+
+# Using same coding criteria as in Hickman et al. (2024) for demographic characteristics of the sample
+clean_demo_data <- bands %>%
+  select(S_ID:tc_race_other) %>%
+  rename("child_age_months_t30" = "TC_AgeMonths_Home_T30", 
+         "mat_age_t30" = "PC_matage_home_T30") %>%
+  mutate(across(TC_Female:pc_ed, as.character)) %>%
+  mutate(TC_Female = recode(TC_Female, 
+                            "0" = "M", 
+                            "1" = "F")) %>%
+  rename("child_sex" = "TC_Female") %>%
+  mutate(pc_latino = recode(pc_latino,
+                            "0" = "No", 
+                            "1" = "MexicanChicano", 
+                            "2" = "PuertoRican", 
+                            "3" = "Cuban", 
+                            "4" = "Other"),
+         pc_latino = case_when(pc_latino == "No" ~ "No", 
+                               .default = "Yes"),
+         tc_latino = recode(tc_latino, 
+                            "0" = "No", 
+                            "1" = "MexicanChicano", 
+                            "2" = "PuertoRican", 
+                            "3" = "Cuban", 
+                            "4" = "Other"),
+         tc_latino = case_when(tc_latino == "No" ~ "No", 
+                               .default = "Yes"),
+         pc_race = recode(pc_race, "0" = "White", 
+                          "1" = "Black", 
+                          "2" = "IndigenousAmerican", 
+                          "3" = "AsianIndian", 
+                          "4" = "Chinese", 
+                          "5" = "Japanese", 
+                          "6" = "Korean", 
+                          "7" = "Vietnamese", 
+                          "8" = "OtherAsian", 
+                          "9" = "Other"),
+         pc_biracial = recode(pc_biracial, "0" = "No", 
+                              "1" = "Yes"),
+         pc_addrace = recode(pc_addrace, "0" = "White", 
+                             "1" = "Black", 
+                             "2" = "IndigenousAmerican", 
+                             "3" = "AsianIndian", 
+                             "4" = "Chinese", 
+                             "5" = "Japanese", 
+                             "6" = "Korean", 
+                             "7" = "Vietnamese", 
+                             "8" = "OtherAsian", 
+                             "9" = "Other"),
+         pc_race_black = recode(pc_race_black, 
+                                "0" = "No", 
+                                "1" = "Yes"),
+         pc_ed = recode(pc_ed, 
+                        "11" = "High School, GED, or less",
+                        "12" = "High School, GED, or less", 
+                        "13" = "High School, GED, or less", 
+                        "14" = "Associate Degree", 
+                        "15" = "Associate Degree", 
+                        "16" = "Four-Year Degree", 
+                        "17" = "Four-Year Degree", 
+                        "18" = "Master's Degree", 
+                        "19" = "Professional Degree or PhD"),
+         tc_race = recode(tc_race, 
+                          "0" = "White", 
+                          "1" = "Black", 
+                          "2" = "IndigenousAmerican", 
+                          "3" = "AsianIndian", 
+                          "4" = "Chinese", 
+                          "5" = "Japanese", 
+                          "6" = "Korean", 
+                          "7" = "Vietnamese", 
+                          "8" = "OtherAsian", 
+                          "9" = "Other"),
+         tc_biracial = recode(tc_biracial, 
+                              "0" = "No", 
+                              "1" = "Yes"),
+         tc_addrace = recode(tc_addrace, 
+                             "0" = "White", 
+                             "1" = "Black", 
+                             "2" = "IndigenousAmerican", 
+                             "3" = "AsianIndian", 
+                             "4" = "Chinese", 
+                             "5" = "Japanese", 
+                             "6" = "Korean", 
+                             "7" = "Vietnamese", 
+                             "8" = "OtherAsian", 
+                             "9" = "Other"),
+         tc_race_black = recode(tc_race_black, 
+                                "0" = "No", 
+                                "1" = "Yes")
+         ) %>%
+  select(-c(pc_race_black, tc_race_black)) %>%
+  mutate(pc_latino_hispanic = case_when(pc_latino == "Yes" ~ "Yes",
+                                        pc_race_other == "Hispanic" ~ "Yes",
+                                        pc_race_other == "Mexican" ~ "Yes",
+                                        pc_race_other == "Latina" ~ "Yes",
+                                        .default = "No"),
+         pc_multiracial_cleaned = case_when(pc_race_other == "biracial" ~ "Yes",
+                                            pc_race_other == "multi" ~ "Yes",
+                                            pc_biracial == "Yes" ~ "Yes",
+                                            .default = "No"),
+         pc_race_cleaned = case_when(pc_multiracial_cleaned == "Yes" ~ "Biracial/Multiracial",
+                                     pc_race == "White" ~ "White",
+                                     pc_race == "Black" ~ "Black",
+                                     pc_race == "IndigenousAmerican" ~ "Other", 
+                                     pc_race == "AsianIndian" ~ "Other",
+                                     pc_race == "Chinese" ~ "Other",
+                                     pc_race == "Japanese" ~ "Other", 
+                                     pc_race == "Korean" ~ "Other",
+                                     pc_race == "Vietnamese" ~ "Other",
+                                     pc_race =="OtherAsian" ~ "Other",
+                                     pc_race == "Other" ~ "Other")) %>%
+  mutate(tc_latino_hispanic = case_when(tc_latino == "Yes" ~ "Yes",
+                                        tc_race_other == "Hispanic" ~ "Yes",
+                                        tc_race_other == "Mexican" ~ "Yes",
+                                        tc_race_other == "Latina" ~ "Yes",
+                                        .default = "No"),
+         tc_multiracial_cleaned = case_when(tc_race_other == "biracial" ~ "Yes",
+                                            tc_race_other == "multi" ~ "Yes",
+                                            tc_biracial == "Yes" ~ "Yes",
+                                            .default = "No"),
+         tc_race_cleaned = case_when(tc_multiracial_cleaned == "Yes" ~ "Biracial/Multiracial",
+                                     tc_race == "White" ~ "White",
+                                     tc_race == "Black" ~ "Black",
+                                     tc_race == "Chinese" ~ "Other",
+                                     tc_race == "Other" ~ "Other")) %>%
+  select(-c(pc_latino:pc_addrace, pc_race_other, last_pc_ed:pc_race_other, pc_multiracial_cleaned, tc_latino:tc_race_other, tc_multiracial_cleaned))
+
+#from EH 7/18
+# Split demographics table into child and mother tables, rename columns so they match, and create grouping column to indicate whether data go with mother or child
+clean_demo_data_tc <- clean_demo_data %>%
+  select(c(S_ID, child_age_months_t30, child_sex, tc_latino_hispanic, tc_race_cleaned)) %>%
+  rename("age" = "child_age_months_t30", "sex" = "child_sex", "latino_hispanic" = "tc_latino_hispanic", "race" = "tc_race_cleaned") %>%
+  mutate(group = "Child") %>%
+  mutate(education = NA)
+
+clean_demo_data_pc <- clean_demo_data %>%
+  select(c(S_ID, mat_age_t30, pc_ed, pc_latino_hispanic, pc_race_cleaned)) %>%
+  rename("age" = "mat_age_t30", "latino_hispanic" = "pc_latino_hispanic", "race" = "pc_race_cleaned", "education" = "pc_ed") %>%
+  mutate(sex = "F", group = "Parent")
+
+# Merge together and level factors
+clean_demo_data_long <- bind_rows(clean_demo_data_pc, clean_demo_data_tc) %>%
+  mutate(race = factor(race, levels = c("White", "Black", "Biracial/Multiracial", "Other")),
+         latino_hispanic = factor(latino_hispanic, levels = c("No", "Yes")),
+         education = factor(education, levels=c("High School, GED, or less", "Associate Degree", 
+                                                "Four-Year Degree", "Master's Degree","Professional Degree or PhD")),
+         sex = factor(sex, levels = c("F", "M")),
+         group = factor(group, levels = c("Parent", "Child")))
+
+# Add labels
+label(clean_demo_data_long$age) <- "Age"
+label(clean_demo_data_long$education) <- "Education"
+label(clean_demo_data_long$latino_hispanic) <- "Latino or Hispanic"
+label(clean_demo_data_long$race) <- "Race"
+label(clean_demo_data_long$sex) <- "Sex"
+
+# Create function for custom table so that Mean (SD) is shown for continuous variables
+my.render.cont <- function(x) {
+  with(stats.apply.rounding(stats.default(x), digits=2), c("",
+                                                           "Mean (SD)"=sprintf("%s (&plusmn; %s)", MEAN, SD)))
+}
+
+# Make table of demographics
+table1(~ sex + age + race + latino_hispanic + education | group,
+       data = clean_demo_data_long, 
+       render.continuous = my.render.cont, 
+       overall = FALSE)
+
+```
+
+
+
+## first half of this code chunk written by allison spring to compare those who are in our analytical sample to those who were not 
+```{r}
+
+data %>% count(Complete_Home_T30)
+
+#These are the S_IDs of the 115 
+my_list<-bands$S_ID
+
+included_subjects <- data[data$S_ID %in% my_list, ] %>%
+  dplyr::filter(Complete_Home_T30==1)
+
+
+Removed_subjects <- data[!data$S_ID %in% my_list, ] %>%
+  filter(Complete_Home_T30==1)
+
+
+included_subjects <- lapply(included_subjects, as.numeric)
+Removed_subjects  <- lapply(Removed_subjects, as.numeric)
+
+Removed_subjects <- as.data.frame(Removed_subjects)
+included_subjects <- as.data.frame(included_subjects)
+
+# Identify numeric columns (skip non-numeric)
+numeric_cols <- sapply(Removed_subjects, is.numeric)
+
+# Subset the data frame to include only numeric columns
+df_numeric <- Removed_subjects[, numeric_cols]
+
+# Compute the column means for only numeric columns
+averages <- colMeans(df_numeric, na.rm = TRUE)
+
+# Print the result
+print(averages)
+
+# Compute the average of each column in both datasets
+averages_included_subjects <- colMeans(included_subjects, na.rm = TRUE)
+averages_Removed_subjects <- colMeans(Removed_subjects, na.rm = TRUE)
+
+# Combine the averages into a data frame for better visualization
+averages_combined <- data.frame(
+  averages_included_subjects = averages_included_subjects,
+  averages_Removed_subjects = averages_Removed_subjects
+)
+
+# Print the averages
+print(averages_combined)
+
+
+# jcf
+Removed_subjects$in_sample <- "0"
+included_subjects$in_sample <- "1"
+
+all_subjects <- rbind(Removed_subjects, included_subjects)
+all_subjects <- all_subjects %>% 
+  mutate(across(TC_Female:tc_race_other, as.factor))
+
+# comparison using compareGroups
+table1_comparison <- compareGroups(in_sample ~ . - S_ID, data= all_subjects, method=4)
+  # method = 4 does a shapiro wilks test to determine normality of each var
+
+table1_comparison
+
+createTable(table1_comparison)
+
+hist(all_subjects$income2needs_T30)
+wilcox.test(income2needs_T30 ~in_sample, data=all_subjects, alternative="two.sided")
+
+```
+
+
+
+
+
+# RQ1: HOW COMPLIANT WERE TODDLERS WITH WEARING THE SILICONE WRISTBAND AND ANKLE BAND (AS DOCUMENTED BY THE PARENT-COMPLETED DAILY DIARIES)?
+
+## a. Histograms, univariate distributions, and summary statistics (mean, median, min, max, std) for wear time by person (child, parent) and band position (wrist, ankle)
+```{r}
+###### VISUAL ASSESSMENT: histograms
+
+# CHILD WRIST
+#day
+hist(bands$bwb_cwhrsweekday_T30)
+
+#night
+hist(bands$bwb_cwhrsweeknite_T30)
+
+#total 
+hist(bands$bwb_cwhrsweek_T30)
+
+# CHILD ANKLE 
+#day
+hist(bands$bwb_cahrsweekday_T30)
+
+#night
+hist(bands$bwb_cahrsweeknite_T30)
+
+#total 
+hist(bands$bwb_cahrsweek_T30)
+
+# PARENT WRIST
+#day
+hist(bands$bwb_pwhrsweekday_T30)
+
+#night
+hist(bands$bwb_pwhrsweeknite_T30)
+
+#total 
+hist(bands$bwb_pwhrsweek_T30)
+
+```
+
+```{r}
+##### QUANTITATIVE ASSESSMENT
+
+# summary statistics for each person (child, parent), band position (wrist, ankle), and time (day total [max 84], night total [max 84], week total [max 168])
+sumstat_totalweekwear <- wksumwear %>% 
+  group_by(day, person, position) %>% 
+  summarise(median=median(hours, na.rm=TRUE), min= min(hours, na.rm=TRUE), max=max(hours, na.rm=TRUE), mean=mean(hours, na.rm= TRUE), std= sd(hours, na.rm=TRUE))
+
+sumstat_totalweekwear
+
+## comparison of wrist and ankle wear time overall and within time of day (day, night) strata ##
+
+# creating a new df 
+wksumsep <- wksumwear %>% 
+  filter(!(day=="wktotal"),                                              # only day and night wear
+         !(person=="parent")) %>%                                        # only children
+  mutate(day = case_when(day == "daytotal" ~ "Day",                      # cleaning of var names for figure 1 later
+                        day == "nighttotal" ~ "Night")) %>% 
+  mutate(position = case_when(position == "wrist" ~ "Child Wrist",
+                        position == "ankle" ~ "Child Ankle",
+                        position == "parentwrist" ~ "Parent Wrist"))
+
+## OVERALL COMPARISON 
+
+# unpaired comparison of hours worn between the wrist and ankle band overall (day and night together)
+wilcox.test(hours ~ position, data=wksumsep)
+
+# paired comparison of hours worn between the wrist and ankle band overall (day and night together)
+wilcox.test(x = wksumsep$hours[wksumsep$position == "Child Wrist"],  
+            y = wksumsep$hours[wksumsep$position == "Child Ankle"],  
+            paired = TRUE)
+
+
+## WITHIN TIME OF DAY STRATA 
+
+# DAYTIME
+
+# new df of only day
+wksumsep_day <- wksumsep %>% 
+  filter(day=="Day")
+
+# unpaired comparison of hours worn between the wrist and ankle band during the day
+wilcox.test(hours ~ position, data=wksumsep_day)
+
+# paired comparison of hours worn between the wrist and ankle band during the day
+wilcox.test(x = wksumsep_day$hours[wksumsep_day$position == "Child Wrist"],  
+            y = wksumsep_day$hours[wksumsep_day$position == "Child Ankle"],  
+            paired = TRUE)
+
+
+
+# NIGHTTIME
+
+# new df of only night 
+wksumsep_night <- wksumsep %>% 
+  filter(day=="Night")
+
+# unpaired comparison of hours worn between the wrist and ankle band at night
+wilcox.test(hours ~ position, data=wksumsep_night)
+
+# paired comparison of hours worn between the wrist and ankle band at night 
+wilcox.test(x = wksumsep_night$hours[wksumsep_night$position == "Child Wrist"],  
+            y = wksumsep_night$hours[wksumsep_night$position == "Child Ankle"],  
+            paired = TRUE)
+
+
+
+
+
+# Within wrist band, is wear time different by time of day?
+wksumsep_child_wrist <- wksum_child_wrist %>% 
+  filter(!day=="wktotal")
+
+# unpaired comparison of hours worn between the day and night for the wrist band
+wilcox.test(hours ~ day, data=wksumsep_child_wrist)
+
+# paired comparison of hours worn between the day and night for the wrist band
+wilcox.test(x = wksumsep_child_wrist$hours[wksumsep_child_wrist$day == "daytotal"],  
+            y = wksumsep_child_wrist$hours[wksumsep_child_wrist$day == "nighttotal"],  
+            paired = TRUE)
+
+
+# Within ankle band, is wear time different by time of day?
+wksumsep_child_ankle <- wksum_child_ankle %>% 
+  filter(!day=="wktotal")
+
+# paired comparison of hours worn between the day and night for the ankle band
+wilcox.test(hours ~ day, data=wksumsep_child_ankle)
+
+# paired comparison of hours worn between the day and night for the ankle band
+wilcox.test(x = wksumsep_child_ankle$hours[wksumsep_child_ankle$day == "daytotal"],  
+            y = wksumsep_child_ankle$hours[wksumsep_child_ankle$day == "nighttotal"],  
+            paired = TRUE)
+
+```
+### Primary focus is on DAYTIME WEAR ONLY
+## -new dataframes of only day time wear by each day (1-7) 
+## -summary statistics of day time wear
+## -correlation between number of days worn and total week wear time
+```{r}
+# new long df of day time wear by each day with cleaned variable names
+daywear <- bands %>% 
+  select(S_ID, contains("daytime")) %>% 
+  rename("child_wrist_1" = "bwb_cwhrsdaytime1_T30",                      
+         "child_ankle_1" = "bwb_cahrsdaytime1_T30", 
+         "parent_wrist_1"= "bwb_pwhrsdaytime1_T30",
+         "child_wrist_2" = "bwb_cwhrsdaytime2_T30",
+         "child_ankle_2" = "bwb_cahrsdaytime2_T30",
+         "parent_wrist_2" = "bwb_pwhrsdaytime2_T30",
+         "child_wrist_3" = "bwb_cwhrsdaytime3_T30", 
+         "child_ankle_3" = "bwb_cahrsdaytime3_T30", 
+         "parent_wrist_3" = "bwb_pwhrsdaytime3_T30",
+         "child_wrist_4" = "bwb_cwhrsdaytime4_T30", 
+         "child_ankle_4" = "bwb_cahrsdaytime4_T30", 
+         "parent_wrist_4" = "bwb_pwhrsdaytime4_T30",
+         "child_wrist_5" = "bwb_cwhrsdaytime5_T30", 
+         "child_ankle_5" = "bwb_cahrsdaytime5_T30", 
+         "parent_wrist_5" = "bwb_pwhrsdaytime5_T30",
+         "child_wrist_6" = "bwb_cwhrsdaytime6_T30", 
+         "child_ankle_6" = "bwb_cahrsdaytime6_T30", 
+         "parent_wrist_6" = "bwb_pwhrsdaytime6_T30",
+         "child_wrist_7" = "bwb_cwhrsdaytime7_T30", 
+         "child_ankle_7" ="bwb_cahrsdaytime7_T30", 
+         "parent_wrist_7" = "bwb_pwhrsdaytime7_T30") %>% 
+  pivot_longer(-S_ID, names_to="longname", values_to="hours") %>% 
+  separate(longname, c("person", "position", "day"), sep="_")
+
+# summary statistics for daywear data (day by day)
+    ## median, minimum, maximum, mean, and standard deviation
+sumstat_day <- daywear %>% 
+  group_by(day, person, position) %>% 
+  summarise(median=median(hours, na.rm=TRUE), min= min(hours, na.rm=TRUE), max=max(hours, na.rm=TRUE), mean=mean(hours, na.rm= TRUE), std= sd(hours, na.rm=TRUE))
+
+
+
+# counts of the days by band/person with missing values
+daywear %>% group_by(day, person, position) %>% count(is.na(hours))
+#day 1,2,3,6 no missing 
+#day 4 missing reported hours for 1 child wrist, 1 child ankle, and 1 parent wrist band (all same family--1153)
+#day 5 missing reported hours for 2 child wrist, 2 child ankle, and 2 parent wrist band (all same families-- 1153, 1059)
+#day 7 missing reported hours for 3 child wrist, 3 child ankle, and 3 parent wrist band (all same families-- 1153, 1116, 1029)
+
+
+# wide df of day time wear for each participant by day with counts of how many times they fall in each of the following categories across the week (max 7)
+  # 0-1 hours    = low 
+  # 2-10 hours   = mid
+  # 11-12 hours  = high
+daywear_short <- daywear %>% 
+  pivot_wider(names_from= day, values_from= hours) %>% 
+   rename(day1="1", 
+         day2="2",
+         day3="3",
+         day4="4",
+         day5="5",
+         day6="6", 
+         day7="7") %>%  
+  mutate(n.na=rowSums(is.na(.)), 
+         n.0_1=rowSums(select(.,c(day1:day7)) < 2, na.rm=TRUE),
+         n.2_10=rowSums((select(.,c(day1:day7))) < 11 & (select(.,c(day1:day7))) > 1, na.rm=TRUE), 
+         n.11_12=rowSums(select(.,c(day1:day7)) > 10, na.rm=TRUE), 
+         n.2_12=rowSums(select(.,c(day1:day7)) > 1, na.rm=TRUE)) %>% 
+  rowwise() %>% 
+  mutate(n.total=sum(c_across(c(n.na:n.11_12)))) %>% #check
+  ungroup()
+
+# creating a new binary variable of worn/not worn for the day where
+## worn= 2 or more hours a day 
+## not worn= less than 2 hours a day 
+daywear_short_binary <- daywear_short %>% 
+  mutate(day1b=case_when(day1== NA ~ NA, 
+                         day1 < 2 ~ 0,
+                         day1 >= 2 ~ 1),
+         day2b=case_when(day2== NA ~ NA, 
+                         day2 < 2 ~ 0,
+                         day2 >= 2 ~ 1), 
+         day3b=case_when(day3== NA ~ NA, 
+                         day3 < 2 ~ 0,
+                         day3 >= 2 ~ 1), 
+         day4b=case_when(day4== NA ~ NA, 
+                         day4 < 2 ~ 0,
+                         day4 >= 2 ~ 1), 
+         day5b=case_when(day5== NA ~ NA, 
+                         day5 < 2 ~ 0,
+                         day5 >= 2 ~ 1), 
+         day6b=case_when(day6== NA ~ NA, 
+                         day6 < 2 ~ 0,
+                         day6 >= 2 ~ 1), 
+         day7b=case_when(day7== NA ~ NA, 
+                         day7 < 2 ~ 0,
+                         day7 >= 2 ~ 1)) %>% 
+  mutate(n.daysworn=rowSums(select(.,c(day1b:day7b)), na.rm=TRUE))
+
+## 8 hour threshold 
+daywear_short_binary <- daywear_short_binary %>% 
+  mutate(day1_8=case_when(day1 == NA ~ NA, 
+                          day1 <  8 ~ 0,
+                          day1 >= 8 ~ 1),
+         day2_8=case_when(day2 == NA ~ NA, 
+                          day2 <  8 ~ 0,
+                          day2 >= 8 ~ 1), 
+         day3_8=case_when(day3 == NA ~ NA, 
+                          day3 <  8 ~ 0,
+                          day3 >= 8 ~ 1), 
+         day4_8=case_when(day4 == NA ~ NA, 
+                          day4 <  8 ~ 0,
+                          day4 >= 8 ~ 1), 
+         day5_8=case_when(day5 == NA ~ NA, 
+                          day5 <  8 ~ 0,
+                          day5 >= 8 ~ 1), 
+         day6_8=case_when(day6 == NA ~ NA, 
+                          day6 <  8 ~ 0,
+                          day6 >= 8 ~ 1), 
+         day7_8=case_when(day7 == NA ~ NA, 
+                         day7 <  8 ~ 0,
+                         day7 >= 8 ~ 1)) %>% 
+  mutate(n.daysworn_8=rowSums(select(.,c(day1_8:day7_8)), na.rm=TRUE))
+
+
+
+
+
+
+
+
+# selecting only the daytime weekly wear time total variable for ankle and wrist from "bands" df in order to merge it with the "daywear_short_binary" df
+bands_child_daytotals <- bands %>% 
+  select(S_ID, bwb_cwhrsweekday_T30, bwb_cahrsweekday_T30) %>% 
+  rename("child_wrist_daytotal" = "bwb_cwhrsweekday_T30", 
+         "child_ankle_daytotal" = "bwb_cahrsweekday_T30")
+
+# merge
+daywear_short_binary <- merge(daywear_short_binary, bands_child_daytotals, all=TRUE)
+
+# visual assessment of normality 
+## non normal, will proceed with a spearman test for correlations
+hist(daywear_short_binary$n.daysworn)
+hist(daywear_short_binary$child_wrist_daytotal)
+hist(daywear_short_binary$child_ankle_daytotal)
+
+daywear_short_binary_ankle <- daywear_short_binary %>% 
+  filter(person=="child", 
+         position=="ankle")
+
+daywear_short_binary_wrist <- daywear_short_binary %>% 
+  filter(person=="child", 
+         position=="wrist")
+
+# is the number of days worn in a week correlated with the total hours worn over the week for the ankle band?
+cor.test(daywear_short_binary_ankle$n.daysworn, daywear_short_binary_ankle$child_ankle_daytotal, method="spearman")
+
+# plot
+daywear_corr_ankle <- ggplot(daywear_short_binary_ankle, aes(x=n.daysworn, y=child_ankle_daytotal, color=position)) + 
+  geom_point(alpha= 0.7, size=3) +
+  scale_color_manual(values = ("ankle" = "cornflowerblue")) +
+  stat_cor(method= "spearman", label.x = 1, label.y = 80, color= "black") +
+  geom_point()
+
+daywear_corr_ankle
+
+# is the number of days worn in a week correlated with the total hours worn over the week for the wrist band?
+cor.test(daywear_short_binary_wrist$n.daysworn, daywear_short_binary_wrist$child_wrist_daytotal, method="spearman")
+
+# plot
+daywear_corr_wrist <- ggplot(daywear_short_binary_wrist, aes(x=n.daysworn, y=child_wrist_daytotal, color=position)) + 
+  geom_point(alpha= 0.7, size=3) +
+  scale_color_manual(values = ("wrist" = "orange")) +
+  stat_cor(method= "spearman", label.x = 1, label.y = 80, color= "black") 
+
+daywear_corr_wrist
+
+# combined plot of wrist/ankle
+corr_by_day <- daywear_corr_ankle + daywear_corr_wrist +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 18, face = "bold"))
+  
+corr_by_day
+
+# jpeg("2_OutputGraphs/corr_by_day.jpeg",
+#     width = 8, height = 4, units="in", res=1200)
+# corr_by_day
+# invisible(dev.off())
+
+
+
+# ankle only min and max for total hours across the week
+daywear_short_sum_ankle <- daywear_short_binary_ankle %>% 
+  group_by(n.daysworn) %>% 
+  summarise(min_ankle=min(child_ankle_daytotal), max_ankle=max(child_ankle_daytotal))
+
+# wrist only min and max for total hours across the week
+daywear_short_sum_wrist <- daywear_short_binary_wrist %>% 
+  group_by(n.daysworn) %>% 
+  summarise(min_wrist=min(child_wrist_daytotal), max_wrist=max(child_wrist_daytotal))
+
+# number of participants who wore the band for 0-7 days for the wrist and ankle bands
+daywear_short_binary_wrist %>% count(n.daysworn)
+daywear_short_binary_ankle %>% count(n.daysworn)
+
+# combined df of min and max of total hours worn in the week by the number of days worn
+daywear_short_sum <- merge(daywear_short_sum_ankle, daywear_short_sum_wrist)
+
+daywear_short_sum
+
+
+
+
+# ankle only min and max for total hours across the week
+daywear_short_sum_ankle8 <- daywear_short_binary_ankle %>% 
+  group_by(n.daysworn_8) %>% 
+  summarise(min_ankle=min(child_ankle_daytotal), max_ankle=max(child_ankle_daytotal))
+
+# wrist only min and max for total hours across the week
+daywear_short_sum_wrist8 <- daywear_short_binary_wrist %>% 
+  group_by(n.daysworn_8) %>% 
+  summarise(min_wrist=min(child_wrist_daytotal), max_wrist=max(child_wrist_daytotal))
+
+# number of participants who wore the band for 0-7 days for the wrist and ankle bands
+daywear_short_binary_wrist %>% count(n.daysworn_8)
+daywear_short_binary_ankle %>% count(n.daysworn_8)
+
+# combined df of min and max of total hours worn in the week by the number of days worn
+daywear_short_sum_8 <- merge(daywear_short_sum_ankle8, daywear_short_sum_wrist8)
+
+daywear_short_sum_8
+
+
+```
+
+## b. reliability across the week (cronbach's alpha)
+```{r}
+#dfs by ankle and wrist for day 1 through 7 
+daywear_days1_7_ankle <- daywear_short %>% 
+  filter(position=="ankle") %>% 
+  select(day1:day7) 
+ 
+daywear_days1_7_wrist <- daywear_short %>% 
+  filter(position=="wrist", 
+         person=="child") %>% 
+  select(day1:day7) 
+  
+#dfs by ankle and wrist for day 2 through 7
+daywear_days2_7_ankle <- daywear_days1_7_ankle %>% 
+  select(-day1) 
+
+daywear_days2_7_wrist <- daywear_days1_7_wrist %>% 
+  select(-day1)
+
+#ankle reliability test (cronbach's alpha)
+
+#days 1 through 7
+cronbach.alpha(daywear_days1_7_ankle, CI=TRUE, na.rm=TRUE)
+#days 2 through 7
+cronbach.alpha(daywear_days2_7_ankle, CI=TRUE, na.rm=TRUE)
+
+#wrist reliability test (cronbach's alpha)
+
+#days 1 through 7
+cronbach.alpha(daywear_days1_7_wrist, CI=TRUE, na.rm=TRUE)
+#days 2 through 7
+cronbach.alpha(daywear_days2_7_wrist, CI=TRUE, na.rm=TRUE)
+
+```
+## c. wear time distributions
+### -justification of split at 72 hrs (6 days) based on the histogram
+### -creating new binary variable at 72 hours
+### -Spearman correlations and scatter plots for
+####  1. child wrist vs. child ankle 
+####  2. child wrist vs. parent wrist 
+####  3. child ankle vs. parent wrist
+```{r}
+
+# combining ankle and wrist dfs that have attribute and day, night, and total hours for ONLY the child
+wk_child_attributes <- bind_rows(wk_child_ankle_attributes, wk_child_wrist_attributes)
+
+# combining ankle and wrist dfs that have attribute and day, night, and total hours for child and parent
+wk_all_attributes <- bind_rows(wk_child_ankle_attributes, wk_child_wrist_attributes, wk_adult_attributes)
+
+# selecting only daytime totals (focus of this analysis) and the child attributes
+wk_child_day <- wk_child_attributes %>% 
+  filter(person == "child" & day== "daytotal") %>% 
+  select(-day,
+         -person, 
+         -contains("total"))
+
+hist(wk_child_day$hours, breaks=20) # shows a split at 72 hours which is 6 days of wear
+
+# new binary variable at 72 hours
+wk_child_day <- wk_child_day %>% 
+  mutate(cat_hours = case_when(hours >= 72 ~ "72 or more hours", 
+                               hours < 72 ~ "< 72 hours"))
+
+# check
+wk_child_day %>% count(cat_hours)
+
+# reorder variables in df
+wk_child_day <- wk_child_day %>% 
+  relocate(cat_hours, .before=PSI_Mn_T30)
+
+# long df to plot 
+long_wk_child_day <- wk_child_day %>% 
+  select(-contains("total")) %>% 
+  pivot_longer(!c(S_ID, position, cat_hours, hours), names_to = "attribute", values_to = "value")
+
+
+# scatterplot of day time week long wear (y) for each attribute (scale on the x) by child wrist (orange) and ankle band (blue)
+attribute_scat <- ggplot(long_wk_child_day, aes(x=value, y=hours, color=position, alpha= 0.5)) + 
+  scale_color_manual(values = c("wrist" = "orange", 
+                               "ankle" = "cornflowerblue")) + 
+  geom_point() + 
+  facet_wrap(~attribute, scales= "free")
+
+attribute_scat
+
+# df of adult hours with attributes to assess whether child wear time and parent wear time are correlated
+wk_adult_day <- wk_all_attributes %>% 
+  filter(person == "parent" & day== "daytotal") %>% 
+  select(-day,
+         -person)
+
+# df of adult hours and SID only
+wk_adult_day_hours <- wk_adult_day %>% 
+  select(S_ID, hours) %>% 
+  rename("adult_hours" = "hours")
+
+# separating wrist and ankle to rename/create a new dataframe
+
+# ankle only 
+wk_child_day_ankle <- wk_child_day %>% 
+  filter(position == "ankle")
+
+wk_child_day_ankle_hours <- wk_child_day_ankle %>% 
+  select(S_ID, hours, cat_hours) %>% 
+  rename("ankle_hours" = "hours", 
+         "ankle_cat_hours" = "cat_hours")
+
+#wrist only
+wk_child_day_wrist <- wk_child_day %>% 
+  filter(position == "wrist")
+
+wk_child_day_wrist_hours <- wk_child_day_wrist %>% 
+  select(S_ID, hours, cat_hours) %>% 
+  rename("wrist_hours" = "hours",
+         "wrist_cat_hours" = "cat_hours")
+
+wk_child_day_hours <- merge(wk_child_day_ankle_hours, wk_child_day_wrist_hours, all= TRUE)
+
+wk_all_day_hours <- merge(wk_child_day_hours, wk_adult_day_hours, all= TRUE)
+
+
+
+# what is the average difference across participants for ankle vs. wrist bands?
+wk_child_day_hours$difference <- wk_child_day_hours$ankle_hours-wk_child_day_hours$wrist_hours 
+
+mean(wk_child_day_hours$difference)
+
+# **** paired wilcox sign rank test is presented after demo_weartime df is created ****
+
+
+
+
+# child wrist to ankle spearman correlation
+cor.test(wk_child_day_hours$ankle_hours, wk_child_day_hours$wrist_hours, method="spearman") 
+
+# parent wrist to child wrist spearman correlation 
+cor.test(wk_all_day_hours$adult_hours, wk_all_day_hours$wrist_hours, method="spearman") 
+
+# parent wrist to child ankle spearman correlation
+cor.test(wk_all_day_hours$adult_hours, wk_all_day_hours$ankle_hours, method="spearman") 
+
+
+
+#CORRESPONDING PLOTS 
+
+#wrist by ankle wear time
+anklebywrist_scatter <- ggplot(wk_child_day_hours, aes(x= wrist_hours, y=ankle_hours)) + 
+  geom_point(size= 3) + 
+  stat_cor(method= "spearman", label.x = 3, label.y = 30) + 
+  labs(title= "Child Band Daytime Wear")  
+
+anklebywrist_scatter
+
+#wrist by parent wear time 
+wristbyparent_scatter <- ggplot(wk_all_day_hours, aes(x= wrist_hours, y=adult_hours)) + 
+  geom_point(size= 3, color="orange") + 
+  stat_cor(method= "spearman", label.x = 3, label.y = 30) + 
+  labs(title= "Child wrist by Adult wrist Band Daytime Wear")  
+
+wristbyparent_scatter
+
+#ankle by parent wear time
+anklebyparent_scatter <- ggplot(wk_all_day_hours, aes(x= ankle_hours, y=adult_hours)) + 
+  geom_point(size= 3, color="cornflowerblue") + 
+  stat_cor(method= "spearman", label.x = 3, label.y = 30) + 
+  labs(title= "Child ankle by Adult wrist Band Daytime Wear")  
+
+anklebyparent_scatter
+
+```
+
+## d. Low, moderate, and high wear time categorization by median wear time 
+### Table 2
+```{r}
+
+median_cat_weartime <-  daywear %>% 
+  group_by(S_ID, position, person) %>% 
+  summarise(median= median(hours, na.rm=TRUE)) %>%  # median wear time across the 7 days 
+  # for missing individual days, missing days were removed when calculating the median wear time
+      # 3 participants were missing 1 day 
+      # 1 participant was missing 3 days 
+  mutate(hourscat= case_when(median < 2 ~ "0-1",
+                            median < 11 ~ "2-10",
+                            median > 10 ~ "11-12"))
+# check
+median_cat_weartime %>% 
+  group_by(position, person) %>% 
+  count(hourscat) 
+
+# separating by position to make the matrix
+# ankle
+median_cat_weartime_ankle <-  median_cat_weartime %>% 
+  filter(!person=="parent", 
+         position=="ankle") %>% 
+  rename(ankle_hourscat= hourscat) %>% 
+  ungroup(position) %>% 
+  select(S_ID, ankle_hourscat)
+
+# wrist
+median_cat_weartime_wrist <-  median_cat_weartime %>% 
+  filter(!person=="parent", 
+         position=="wrist") %>% 
+  rename(wrist_hourscat= hourscat) %>%
+  ungroup(position) %>% 
+  select(S_ID, wrist_hourscat)
+
+
+median_cat_weartime_matrix <- merge(median_cat_weartime_ankle, median_cat_weartime_wrist, all= TRUE) %>% 
+  mutate(combined_med = case_when(ankle_hourscat == "11-12" & wrist_hourscat == "11-12" ~ "high ankle & high wrist", 
+                                ankle_hourscat == "11-12" & wrist_hourscat == "2-10" ~ "high ankle & med wrist",
+                                ankle_hourscat == "11-12" & wrist_hourscat == "0-1" ~ "high ankle & no/low wrist",
+                                ankle_hourscat == "2-10" & wrist_hourscat == "11-12" ~ "med ankle & high wrist",
+                                ankle_hourscat == "2-10" & wrist_hourscat == "2-10" ~ "med ankle & med wrist", 
+                                ankle_hourscat == "2-10" & wrist_hourscat == "0-1" ~ "med ankle & no/low wrist",
+                                ankle_hourscat == "0-1" & wrist_hourscat == "11-12" ~ "no/low ankle & high wrist",
+                                ankle_hourscat == "0-1" & wrist_hourscat == "2-10" ~ "no/low ankle & med wrist", 
+                                ankle_hourscat == "0-1" & wrist_hourscat == "0-1" ~ "no/low ankle & no/low wrist"))
+median_cat_weartime_matrix %>% 
+  count(combined_med)
+
+```
+
+## e. Low, moderate, and high wear time categorizations by total week wear
+### Table 2
+```{r}
+
+# new categorical variable for consistency with the <6 days or ≥6 days of wear time over the week
+totalhours_cat <- wk_child_day %>% 
+  select(S_ID:hours) %>% 
+  mutate(threecat_hours= case_when(hours < 12 ~ "low", #less than one full day
+                              hours >= 12 & hours < 72 ~ "med", #mid 
+                              hours >= 72 ~ "high")) #six or more days
+
+totalhours_cat$position_cathours <- paste(totalhours_cat$position, totalhours_cat$threecat_hours)
+
+# now need to position the dfs next to each other rather than stacked 
+totalhours_cat_ankle <- totalhours_cat %>% 
+  filter(position=="ankle") %>% 
+  select(S_ID, position_cathours) %>% 
+  rename("ankle_cathours"= "position_cathours")
+
+totalhours_cat_wrist <- totalhours_cat %>% 
+  filter(position=="wrist") %>% 
+  select(S_ID, position_cathours) %>% 
+  rename("wrist_cathours"= "position_cathours")
+
+# only focused on about day x day and night x night not day x night cross for wrist/ankle
+totalhours_cat_weartime_matrix <- merge(totalhours_cat_ankle, totalhours_cat_wrist, by="S_ID") %>%
+  mutate(combined_total= case_when(wrist_cathours=="wrist high" & ankle_cathours=="ankle high" ~ "high wrist/ high ankle",
+                              wrist_cathours=="wrist high" & ankle_cathours=="ankle med" ~ "high wrist/ med ankle",
+                              wrist_cathours=="wrist high" & ankle_cathours=="ankle low" ~ "high wrist/ low ankle",
+                              wrist_cathours=="wrist med" & ankle_cathours=="ankle high" ~ "med wrist/ high ankle",
+                              wrist_cathours=="wrist med" & ankle_cathours=="ankle med" ~ "med wrist/ med ankle",
+                              wrist_cathours=="wrist med" & ankle_cathours=="ankle low" ~ "med wrist/ low ankle",
+                              wrist_cathours=="wrist low" & ankle_cathours=="ankle high" ~ "low wrist/ high ankle",
+                              wrist_cathours=="wrist low" & ankle_cathours=="ankle med" ~ "low wrist/ med ankle",
+                              wrist_cathours=="wrist low" & ankle_cathours=="ankle low" ~ "low wrist/ low ankle"))
+
+totalhours_cat_weartime_matrix %>% count(combined_total)
+```
+
+# RQ2: TO WHAT EXTENT DO CHILD AND FAMILY CHARACTERISTICS PREDICT CHILD BAND COMPLIANCE?
+
+## a. age and sex
+```{r}
+
+demo_weartime <- merge(wk_all_day_hours, totalhours_cat_weartime_matrix)
+demo_weartime <- merge(demo_weartime,clean_demo_data_tc)
+
+demo_weartime <- demo_weartime %>% 
+  select(-education, # no child education
+         -group)     # all children
+
+demo_weartime <- demo_weartime %>% 
+  mutate(ankle_cat6day=case_when(ankle_hours < 72 ~ "< 72 hours", 
+                                 ankle_hours >= 72 ~ "72 or more hours"), 
+         wrist_cat6day=case_when(wrist_hours < 72 ~ "< 72 hours", 
+                                 wrist_hours >= 72 ~ "72 or more hours"))
+
+# checks to make sure the categories match 
+demo_weartime %>% count(ankle_cat6day)
+demo_weartime %>% count(ankle_cathours)
+demo_weartime %>% count(wrist_cat6day)
+demo_weartime %>% count(wrist_cathours)
+
+# AGE AND DAYTIME HOURS WORN
+
+# plot of age (x) and wrist hours (y)
+wristbyage_scatter <-  ggplot(demo_weartime, aes(x=age, y=wrist_hours)) + 
+  geom_point(size= 3, color = "orange") + 
+  labs(title= "Child Wrist Band Daytime Wear by Age") + 
+ ylab("Wrist Daytime Wear") +
+  xlab("Age (months)") + 
+  stat_cor(method = "spearman", label.x=c(30,30), label.y=c(35,40), digits= 3)
+
+wristbyage_scatter
+
+# plot of age (x) and ankle hours (y)
+anklebyage_scatter <-  ggplot(demo_weartime, aes(x=age, y=ankle_hours)) + 
+  geom_point(size= 3, color = "cornflowerblue") + 
+  labs(title= "Child Ankle Band Daytime Wear by Age") + 
+ ylab("Ankle Daytime Wear") +
+  xlab("Age (months)") + 
+  stat_cor(method = "spearman", label.x=c(30,30), label.y=c(35,40), digits= 3)
+
+anklebyage_scatter
+
+
+
+# CHILD SEX AND DAYTIME HOURS WORN
+## plots + wilcox rank sum (unpaired) test
+
+# wrist
+ggplot(demo_weartime, aes(x=sex, y=wrist_hours, fill= sex)) + 
+  geom_boxplot() + 
+  labs(title= "Child Wrist Band Daytime Wear by Sex") + 
+  theme(legend.position= "none") + 
+  scale_fill_manual(values = c("F" = "darkorange", 
+                               "M" = "aquamarine3")) +
+  geom_jitter(position=position_jitter(0.15)) + 
+  stat_compare_means(method= "wilcox.test")
+
+wilcox_test(data= demo_weartime, wrist_hours ~ sex)
+
+# ankle
+ggplot(demo_weartime, aes(x=sex, y=ankle_hours, fill= sex)) + 
+  geom_boxplot() + 
+  labs(title= "Child Ankle Band Daytime Wear by Sex") + 
+  theme(legend.position= "none") + 
+  scale_fill_manual(values = c("F" = "darkorange", 
+                               "M" = "aquamarine3")) +
+  geom_jitter(position=position_jitter(0.15)) + 
+  stat_compare_means(method= "wilcox.test")
+
+wilcox_test(data= demo_weartime, ankle_hours ~ sex)
+
+# ankle by wrist band scatter (colors = sex)
+anklebywrist_scatter_sex <-  ggplot(demo_weartime, aes(x=wrist_hours, y=ankle_hours, color= sex)) + 
+  geom_point(size= 3) + 
+  labs(title= "Child Band Daytime Wear by Sex") + 
+  scale_color_manual(values = c("F" = "darkorange", 
+                               "M" = "aquamarine3")) +
+ ylab("Ankle Daytime Wear") +
+  xlab("Wrist Daytime Wear") + 
+  stat_cor(method = "spearman", label.x=c(3,5), label.y=c(30,35))
+
+anklebywrist_scatter_sex
+
+
+
+# mean total wear time didn't differ by sex (boxplot/wilcox test) for wrist or ankle bands but for both male and female children, wrist and ankle wear time were correlated (scatter/spearman correlation)
+
+
+
+# separate dfs of male and female
+demo_weartime_female <- demo_weartime %>% 
+  filter(sex=="F")
+
+demo_weartime_male <- demo_weartime %>% 
+  filter(sex=="M")
+
+
+# female only plot
+anklebywrist_scatter_f <-  ggplot(demo_weartime_female, aes(x=wrist_hours, y=ankle_hours)) + 
+  geom_point(size= 3, color="darkorange") + 
+  labs(title= "Child Band Daytime Wear for Female") +
+  ylab("Ankle Daytime Wear") +
+  xlab("Wrist Daytime Wear") + 
+  stat_cor(method = "spearman", label.x=c(3,5), label.y=c(30,35))
+
+anklebywrist_scatter_f
+
+# male only plot
+anklebywrist_scatter_m <-  ggplot(demo_weartime_male, aes(x=wrist_hours, y=ankle_hours)) + 
+  geom_point(size= 3, color="aquamarine3") + 
+  labs(title= "Child Band Daytime Wear for Male") +
+  ylab("Ankle Daytime Wear") +
+  xlab("Wrist Daytime Wear") + 
+  stat_cor(method = "spearman", label.x=c(3,5), label.y=c(30,35), digits= 3)
+
+anklebywrist_scatter_m
+
+
+
+# AGE AND DAYTIME HOURS WORN STRATIFIED BY SEX
+
+# ankle hours (y) by age (x) stratified by sex (M= teal, F= orange)
+anklebyage_scatter_sex <-  ggplot(demo_weartime, aes(x=age, y=ankle_hours, color= sex)) + 
+  geom_point(size= 3) + 
+  labs(title= "Child Ankle Band Daytime Wear by Age (x) and Sex (color)") + 
+  scale_color_manual(values = c("F" = "darkorange", 
+                               "M" = "aquamarine3")) +
+ ylab("Ankle Daytime Wear") +
+  xlab("Age") + 
+  stat_cor(method = "spearman", label.x=c(30,30), label.y=c(35,40))
+
+anklebyage_scatter_sex 
+
+# wrist hours (y) by age (x) stratified by sex (M= teal, F= orange)
+wristbyage_scatter_sex <-  ggplot(demo_weartime, aes(x=age, y=wrist_hours, color= sex)) + 
+  geom_point(size= 3) + 
+  labs(title= "Child Wrist Band Daytime Wear by Age (x) and Sex (color)") + 
+  scale_color_manual(values = c("F" = "darkorange", 
+                               "M" = "aquamarine3")) +
+ ylab("Wrist Daytime Wear") +
+  xlab("Age") + 
+  stat_cor(method = "spearman", label.x=c(30,30), label.y=c(35,40), digits= 3)
+
+wristbyage_scatter_sex 
+
+
+
+demo_weartime_ankle <- demo_weartime %>% 
+  select(-wrist_hours, -wrist_cat_hours) %>% 
+  mutate(position = "ankle") %>% 
+  rename("hours"= "ankle_hours", 
+         "cat6day" = "ankle_cat_hours")
+
+demo_weartime_wrist <- demo_weartime %>% 
+  select(-ankle_hours, -ankle_cat_hours) %>% 
+  mutate(position = "wrist") %>% 
+  rename("hours"= "wrist_hours", 
+        "cat6day" = "wrist_cat_hours")
+
+demo_weartime_sep <- rbind(demo_weartime_ankle, demo_weartime_wrist)
+  
+
+
+# by position, not paired
+weartime_xband_yhours_groupedsex <-  ggplot(demo_weartime_sep, aes(x=position, y=hours, fill= sex)) +
+  geom_boxplot(outlier.shape = NA) + 
+  labs(title= "Child  Band Daytime Wear by Position and Child Sex", size= 6) + 
+  scale_fill_manual(values = c("F" = "darkorange", 
+                               "M" = "aquamarine3")) +
+  geom_jitter(size=0.3, alpha= 0.9, position = position_jitterdodge(0.07)) +
+  stat_compare_means(method = "wilcox.test",  
+                     label.x = 5, label.y = 90, size = 5)
+
+weartime_xband_yhours_groupedsex
+
+
+# unpaired
+ggplot(demo_weartime_sep, aes(x=position, y=hours, fill= position)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  labs(title= "Child Band Daytime Wear by Position (unpaired)") + 
+  scale_fill_manual(values = c("wrist" = "orange", 
+                               "ankle" = "cornflowerblue")) +
+  geom_jitter(size=0.3, alpha= 0.9, position = position_jitterdodge(0.07)) +
+  stat_compare_means(method = "wilcox.test",
+                      label.y = 90, size = 5)
+
+# paired, not stratified by sex
+ggplot(demo_weartime_sep, aes(x=position, y=hours, fill= position)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  labs(title= "Child Band Daytime Wear by Position (paired)") + 
+  scale_fill_manual(values = c("wrist" = "orange", 
+                               "ankle" = "cornflowerblue")) +
+  geom_jitter(size=0.3, alpha= 0.9, position = position_jitterdodge(0.07)) +
+  stat_compare_means(method = "wilcox.test", paired= TRUE,
+                      label.y = 90, size = 5)
+
+
+# paired, stratified by sex
+weartime_xsex_yhours_groupedband_paired <- ggplot(demo_weartime_sep, aes(x=sex, y=hours, fill= position)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  labs(title= "Child Band Daytime Wear by Sex (paired)") + 
+  scale_fill_manual(values = c("wrist" = "orange", 
+                               "ankle" = "cornflowerblue")) +
+  geom_jitter(size=0.3, alpha= 0.9, position = position_jitterdodge(0.07)) +
+  stat_compare_means(method = "wilcox.test", paired= TRUE,
+                      label.x = 5, label.y = 90, size = 5)
+
+weartime_xsex_yhours_groupedband_paired
+
+# wilcox rank sum
+wilcox.test(hours ~ position, data=demo_weartime_sep)
+# wilcox sign rank 
+wilcox.test(x = demo_weartime_sep$hours[demo_weartime_sep$position == "wrist"],  
+            y = demo_weartime_sep$hours[demo_weartime_sep$position == "ankle"],  
+            paired = TRUE)
+
+# ** results presented under RQ1 results section manuscript **
+
+
+# mean daytime wear hours for ankle and wrist
+demo_weartime_sep %>% group_by(position) %>% summarise(mean(hours))
+
+# mean daytime wear hours for ankle and wrist stratified by sex 
+demo_weartime_sep %>% group_by(position, sex) %>% summarise(mean(hours))
+
+```
+
+## b. band wear time categories (total hours) and age
+```{r}
+# visual check for normality 
+hist(demo_weartime$age)
+
+# quant check for normality
+shapiro.test(demo_weartime$age) # p= 0.06219, age is normally distributed, ok to use anova
+
+demo_weartime$ankle_cathours <- factor(demo_weartime$ankle_cathours, 
+                                    levels=c("ankle low", "ankle med", "ankle high"), ordered=TRUE)  
+
+demo_weartime$wrist_cathours <- factor(demo_weartime$wrist_cathours, 
+                                    levels=c("wrist low", "wrist med", "wrist high"), ordered=TRUE)
+
+# ANOVA TO COMPARE THREE GROUPS (HIGH MED LOW)
+
+# ankle band
+ankle_anova <- aov(age ~ ankle_cathours,
+            data= demo_weartime)
+summary(ankle_anova)
+    # no post hoc test needed
+
+# wrist band
+wrist_anova <- aov(age ~ wrist_cathours,
+            data= demo_weartime) 
+summary(wrist_anova)
+
+# post hoc test for multiple comparisons
+tukey_hsd(wrist_anova, conf.level=0.95)
+
+    # age of high wearers is sig dif (adj p= 0.0275)
+
+demo_weartime %>% group_by(wrist_cathours) %>% summarise(mean(age))
+
+
+# PLOTS
+
+# ankle band box
+ggplot(demo_weartime, aes(x=ankle_cathours, y=age, fill=ankle_cathours)) + geom_boxplot() + labs(title= "Boxplot of Ankle Cat by Age") + theme(legend.position= "none")
+
+# wrist band box
+ggplot(demo_weartime, aes(x=wrist_cathours, y=age, fill=wrist_cathours)) + geom_boxplot() + labs(title= "Boxplot of Wrist Cat by Age") + theme(legend.position= "none")
+```
+
+## c. long sleeves/ pants
+```{r}
+
+# selecting variables with sleeve/ pant data
+sleeves_pants_day <- bands %>% 
+  select(S_ID, 
+         contains("sleeve"), 
+         contains("pant"),
+         contains("daytime"), 
+         contains("week")) %>%  
+  rename("child_wrist_day1" = "bwb_cwhrsdaytime1_T30", 
+         "child_ankle_day1" = "bwb_cahrsdaytime1_T30", 
+         "parent_wrist_day1"= "bwb_pwhrsdaytime1_T30",
+         "child_wrist_day2" = "bwb_cwhrsdaytime2_T30",
+         "child_ankle_day2" = "bwb_cahrsdaytime2_T30",
+         "parent_wrist_day2" = "bwb_pwhrsdaytime2_T30",
+         "child_wrist_day3" = "bwb_cwhrsdaytime3_T30", 
+         "child_ankle_day3" = "bwb_cahrsdaytime3_T30", 
+         "parent_wrist_day3" = "bwb_pwhrsdaytime3_T30",
+         "child_wrist_day4" = "bwb_cwhrsdaytime4_T30", 
+         "child_ankle_day4" = "bwb_cahrsdaytime4_T30", 
+         "parent_wrist_day4" = "bwb_pwhrsdaytime4_T30",
+         "child_wrist_day5" = "bwb_cwhrsdaytime5_T30", 
+         "child_ankle_day5" = "bwb_cahrsdaytime5_T30", 
+         "parent_wrist_day5" = "bwb_pwhrsdaytime5_T30",
+         "child_wrist_day6" = "bwb_cwhrsdaytime6_T30", 
+         "child_ankle_day6" = "bwb_cahrsdaytime6_T30", 
+         "parent_wrist_day6" = "bwb_pwhrsdaytime6_T30",
+         "child_wrist_day7" = "bwb_cwhrsdaytime7_T30", 
+         "child_ankle_day7" ="bwb_cahrsdaytime7_T30", 
+         "parent_wrist_day7" = "bwb_pwhrsdaytime7_T30",
+         
+         "child_wrist_wktotal" = "bwb_cwhrsweek_T30",
+         "child_wrist_daytotal" = "bwb_cwhrsweekday_T30",
+         "child_wrist_nighttotal" = "bwb_cwhrsweeknite_T30",
+         "child_ankle_wktotal" = "bwb_cahrsweek_T30",
+         "child_ankle_daytotal" = "bwb_cahrsweekday_T30",
+         "child_ankle_nighttotal" = "bwb_cahrsweeknite_T30",
+         
+         "day1_sleeves" = "bwb_day1_cwsleeves_T30",
+         "day2_sleeves" = "bwb_day2_cwsleeves_T30", 
+         "day3_sleeves" = "bwb_day3_cwsleeves_T30",
+         "day4_sleeves" = "bwb_day4_cwsleeves_T30", 
+         "day5_sleeves" = "bwb_day5_cwsleeves_T30", 
+         "day6_sleeves" = "bwb_day6_cwsleeves_T30", 
+         "day7_sleeves" = "bwb_day7_cwsleeves_T30", 
+         
+         "day1_pants" = "bwb_day1_capants_T30",
+         "day2_pants" = "bwb_day2_capants_T30",
+         "day3_pants" = "bwb_day3_capants_T30", 
+         "day4_pants" = "bwb_day4_capants_T30", 
+         "day5_pants" = "bwb_day5_capants_T30", 
+         "day6_pants" = "bwb_day6_capants_T30", 
+         "day7_pants" = "bwb_day7_capants_T30")
+
+sleeves_pants_day_long <- sleeves_pants_day %>% 
+  select(S_ID, contains("sleeve"), contains("pants")) %>% 
+  pivot_longer(!S_ID, names_to = "longname", values_to= "present")
+
+sleeves_wrist <- sleeves_pants_day %>% 
+  select(S_ID, (contains("wrist") & contains("child")), contains("sleeve")) %>% 
+  mutate(n.na=rowSums(is.na(select(.,c(day1_sleeves:day7_sleeves)))), 
+         n.yes=rowSums(select(.,c(day1_sleeves:day7_sleeves)) == 1, na.rm=TRUE),
+         n.no=rowSums((select(.,c(day1_sleeves:day7_sleeves))) == 0, na.rm=TRUE)) %>% 
+  rowwise() %>% 
+  mutate(n.total=sum(c_across(c(n.na:n.no))),
+         sleeves_per_yes= n.yes / 7) %>% #check
+  ungroup()
+
+
+# without removing rows with all missing
+sleeves_percent_scatter_all <- ggplot(sleeves_wrist, aes(x=sleeves_per_yes, y=child_wrist_daytotal)) + 
+  geom_point(color="orange") + 
+  stat_cor(method = "spearman", label.y=c(30,35), digits= 3) +
+  labs(title= "Daytime Wristband Hours by Percent of the week wearing sleeves") + 
+  ylab("Total Daytime hours") + 
+  xlab("Percent of the week wearing sleeves")
+  
+sleeves_percent_scatter_all 
+
+#removing the participants that had n.na=7 (all missing)
+sleeves_wrist <- sleeves_wrist %>% 
+  filter(!n.na==7)
+
+sleeves_percent_scatter_noallna <- ggplot(sleeves_wrist, aes(x=sleeves_per_yes, y=child_wrist_daytotal)) + 
+  geom_point(color="orange") + 
+  stat_cor(method = "spearman", label.y=c(30,35), digits= 3) +
+  labs(title= "Daytime Wristband Hours by Percent of the week wearing sleeves") + 
+  ylab("Total Daytime hours") + 
+  xlab("Percent of the week wearing sleeves")
+  
+sleeves_percent_scatter_noallna 
+
+pants_ankle <- sleeves_pants_day %>% 
+  select(S_ID, contains("ankle"), contains("pant")) %>% 
+  mutate(n.na=rowSums(is.na(select(.,c(day1_pants:day7_pants)))), 
+         n.yes=rowSums(select(.,c(day1_pants:day7_pants)) == 1, na.rm=TRUE),
+         n.no=rowSums((select(.,c(day1_pants:day7_pants))) == 0, na.rm=TRUE)) %>% 
+  rowwise() %>% 
+  mutate(n.total=sum(c_across(c(n.na:n.no))),
+         pants_per_yes= n.yes / 7) %>% #check
+  ungroup()
+
+pants_percent_scatter_all <- ggplot(pants_ankle, aes(x=pants_per_yes, y=child_ankle_daytotal)) + 
+  geom_point(color="cornflowerblue") + 
+  stat_cor(method = "spearman", label.y=c(30,35)) +
+  labs(title= "Daytime Ankle Band Hours by Percent of the week wearing sleeves") + 
+  ylab("Total Daytime hours") + 
+  xlab("Percent of the week wearing pants")
+
+pants_percent_scatter_all
+
+# removing the participants that had n.na=7 (all missing)
+pants_ankle <- pants_ankle %>% 
+  filter(!n.na==7)
+
+pants_percent_scatter_noallna <- ggplot(pants_ankle, aes(x=pants_per_yes, y=child_ankle_daytotal)) + 
+  geom_point(color="cornflowerblue") + 
+  stat_cor(method = "spearman", label.y=c(30,35), digits= 3) +
+  labs(title= "Daytime Ankle Band Hours by Percent of the week wearing sleeves") + 
+  ylab("Total Daytime hours") + 
+  xlab("Percent of the week wearing pants")
+
+pants_percent_scatter_noallna
+
+```
+
+## d. childcare
+### ccare1_T30: Childcare Q1. Typical week, how many places does child receive care outside of self and live-in partner?
+```{r}
+
+# look at counts for how many places the child receives care outside the home in a typical week (range = 0-5)
+bands %>% count(ccare1_T30)
+
+# categorize to collapse small categories 
+childcare <- bands %>% 
+  select(S_ID, ccare1_T30) %>% 
+  mutate(childcare_cat = case_when(ccare1_T30== 0 ~ "0",             
+         # 3 categories
+                                   ccare1_T30== 1 ~ "1", 
+                                   ccare1_T30== 2 ~ "2 or more", 
+                                   ccare1_T30== 3 ~ "2 or more", 
+                                   ccare1_T30== 4 ~ "2 or more",
+                                   ccare1_T30== 5 ~ "2 or more"),
+         childcare_bi = case_when(ccare1_T30== 0 ~ "No chilcare",     
+         # binary, childcare/no
+                                   ccare1_T30== 1 ~ "Childcare", 
+                                   ccare1_T30== 2 ~ "Childcare", 
+                                   ccare1_T30== 3 ~ "Childcare", 
+                                   ccare1_T30== 4 ~ "Childcare",
+                                   ccare1_T30== 5 ~ "Childcare"), 
+         childcare_cat_num = case_when(ccare1_T30== 0 ~ 0,            
+         # 3 categories, as numeric for anova
+                                   ccare1_T30== 1 ~ 1, 
+                                   ccare1_T30== 2 ~ 2, 
+                                   ccare1_T30== 3 ~ 2, 
+                                   ccare1_T30== 4 ~ 2,
+                                   ccare1_T30== 5 ~ 2))
+# checks
+childcare %>% count(childcare_cat)
+childcare %>% count(childcare_cat_num)
+childcare %>% count(childcare_bi)
+# counts match the noncollapsed vars 
+
+
+# merge with wear time
+table3_childcare <- merge(childcare, demo_weartime)
+# table3_childcare %>% group_by(wrist_cat6day) %>% count(childcare_cat)
+# table3_childcare %>% group_by(ankle_cat6day) %>% count(childcare_cat)
+
+hist(table3_childcare$wrist_hours) # non normal 
+
+
+
+
+# WRIST
+
+# kruskal wallis test for multiple comparisons (non normal data)
+kruskal.test(wrist_hours ~ childcare_cat, data= table3_childcare)
+
+# plot
+
+# 3 group comparison
+childcare_wrist_box <- ggplot(table3_childcare, aes(x=childcare_cat, y=wrist_hours, fill=childcare_cat)) + 
+  geom_boxplot(alpha=1, fill= "orange", outlier.shape=NA) +
+  stat_kruskal_test(label= "Kruskal-Wallis, p = {p.format}", label.y= 86) +
+  geom_jitter(size=0.5, alpha= 0.9, position = position_jitterdodge(0.07)) +
+  labs(title= "Child Wrist Band Total Wear Times by Number of Child Care facilities")
+
+childcare_wrist_box
+
+# 2 group comparison
+childcarebi_wrist_box <- ggplot(table3_childcare, aes(x=childcare_bi, y=wrist_hours, fill=childcare_bi)) + 
+  geom_boxplot(alpha=1, fill= "orange", outlier.shape=NA) + 
+  geom_jitter(size=0.5, alpha= 0.9, position = position_jitterdodge(0.07)) + 
+  labs(title= "Child Wrist Band Total Wear Times by Number of Child Care facilities") +
+  stat_compare_means(method= "wilcox.test", label.y = 90)
+
+childcarebi_wrist_box 
+
+
+
+
+# ANKLE
+
+hist(table3_childcare$ankle_hours) # non normal 
+
+# kruskal wallis test for multiple comparisons (non normal data)
+kruskal.test(ankle_hours ~ childcare_cat, data= table3_childcare)
+
+# plot
+
+# 3 group comparison
+childcare_ankle_box <- ggplot(table3_childcare, aes(x=childcare_cat, y=ankle_hours, fill=childcare_cat)) + 
+  geom_boxplot(alpha=1, fill= "cornflowerblue", outlier.shape=NA) + 
+  stat_kruskal_test(label= "Kruskal-Wallis, p = {p.format}", label.y= 86) +
+  geom_jitter(size=0.5, alpha= 0.9, position = position_jitterdodge(0.07)) + 
+  labs(title= "Child Ankle Band Total Wear Times by Number of Child Care facilities")
+
+childcare_ankle_box
+
+# 2 group comparison
+childcarebi_ankle_box <- ggplot(table3_childcare, aes(x=childcare_bi, y=ankle_hours, fill=childcare_bi)) + 
+  geom_boxplot(alpha=1, fill= "cornflowerblue", outlier.shape=NA) + 
+  geom_jitter(size=0.5, alpha= 0.9, position = position_jitterdodge(0.07)) + 
+  labs(title= "Child Ankle Band Total Wear Times by Number of Child Care facilities") + 
+  stat_compare_means(method= "wilcox.test", label.y = 90)
+
+childcarebi_ankle_box
+
+
+
+```
+
+## e. disabilities
+### cdc Does child have any suspected or identified disabilities?
+```{r}
+
+# select variable and merge with wear time 
+## 
+cdc <- bands %>% 
+  select(S_ID, cdc_disany_T30) 
+
+cdc <- merge(cdc, wk_child_day_hours)
+
+cdc %>% count(cdc_disany_T30)
+  # 0 == none       N=83
+  # 1 == yes        N=19
+  # NA == missing   N=13
+
+cdc <- cdc %>% 
+  filter(!is.na(cdc_disany_T30)) %>% 
+  mutate(disany_binary=case_when(cdc_disany_T30 == 0 ~ "none", 
+                                 cdc_disany_T30 == 1 ~ "one"))
+
+# WRIST 
+cdc_wrist_wilcox <- wilcox_test(data=cdc, wrist_hours ~ disany_binary)
+formatted_stat <- format.pval(cdc_wrist_wilcox$statistic, digits = 3)
+print(formatted_stat)
+
+# ANKLE
+cdc_ankle_wilcox <- wilcox_test(data=cdc, ankle_hours ~ disany_binary)
+formatted_stat <- format.pval(cdc_ankle_wilcox$statistic, digits = 3)
+print(formatted_stat)
+```
+
+## f. spearman correlations between attributes and child wrist and ankle wear time
+```{r}
+
+# WRIST
+attributes <- as.vector(colnames(wk_child_day_wrist[5:15]))
+is.vector(attributes)
+
+# empty df to store results
+results_df <- data.frame(
+  variable = character(),
+  correlation = numeric(),
+  p_value = numeric(),
+  conf_lower = numeric(),
+  conf_upper = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# spearman correlation for each variable in the list
+for (var in attributes) {
+  test_result <- cor.test(wk_child_day_wrist[[var]], wk_child_day_wrist$hours, method= "spearman")
+  
+  p_value <- ifelse(is.na(test_result$p.value), NA, test_result$p.value)
+  
+  # append the results to the dataframe
+  results_df <- rbind(results_df, data.frame(
+    variable = var,
+    correlation = test_result$estimate,
+    p_value = p_value,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# rename 
+corr_child_atttributesdaywear_wrist <- results_df
+
+# check for psi_mn
+cor.test(wk_child_day_wrist$PSI_Mn_T30, wk_child_day_wrist$hours, method= "spearman")
+
+
+
+
+# ANKLE
+attributes <- as.vector(colnames(wk_child_day_ankle[5:15]))
+is.vector(attributes)
+
+# empty df to store results
+results_df <- data.frame(
+  variable = character(),
+  correlation = numeric(),
+  p_value = numeric(),
+  conf_lower = numeric(),
+  conf_upper = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# spearman correlation for each variable in the list
+for (var in attributes) {
+  test_result <- cor.test(wk_child_day_ankle[[var]], wk_child_day_ankle$hours, method= "spearman")
+  
+  p_value <- ifelse(is.na(test_result$p.value), NA, test_result$p.value)
+  
+  # append the results to the dataframe
+  results_df <- rbind(results_df, data.frame(
+    variable = var,
+    correlation = test_result$estimate,
+    p_value = p_value,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# rename 
+corr_child_atttributesdaywear_ankle <- results_df
+
+# check
+cor.test(wk_child_day_ankle$PSI_Mn_T30, wk_child_day_ankle$hours, method= "spearman")
+
+```
+
+## g. wilcox rank sum tests to see if wear time groups have dif attribute scores (low/mod; less than 72 hours vs. high ≥72 hours)
+### table 3
+```{r}
+
+# modified from TAME2 Ch4 "Unpaired example" https://uncsrp.github.io/TAME2/two-group-comparisons-and-visualizations.html#unpaired-test-example
+
+# WRIST 
+endpoints <- colnames(wk_child_day_wrist %>% select(PSI_Mn_T30:PAS_AVG_T30)) 
+
+# create dataframe to store results
+cat_hours_wrist_wilcoxres <- data.frame()
+
+# run for loop
+for (i in 1:length(endpoints)) {
+  
+  # assign a name to the endpoint variable.
+  endpoint <- endpoints[i]
+  
+  # run wilcox test and store in results dataframe.
+  res_df <- wk_child_day_wrist %>%
+    wilcox_test(as.formula(paste0(endpoint, "~ cat_hours", sep = "")))
+  
+  # bind results from this test with other tests in this loop
+  cat_hours_wrist_wilcoxres <- rbind(cat_hours_wrist_wilcoxres, res_df)
+  
+}
+
+cat_hours_wrist_wilcoxres
+
+#ANKLE
+endpoints <- colnames(wk_child_day_ankle %>% select(PSI_Mn_T30:PAS_AVG_T30)) 
+
+# create dataframe to store results
+cat_hours_ankle_wilcoxres <- data.frame()
+
+# run for loop
+for (i in 1:length(endpoints)) {
+  
+  # assign a name to the endpoint variable.
+  endpoint <- endpoints[i]
+  
+  # run wilcox test and store in results dataframe.
+  res_df <- wk_child_day_ankle %>%
+    wilcox_test(as.formula(paste0(endpoint, "~ cat_hours", sep = ""))) 
+  
+  # bind results from this test with other tests in this loop
+  cat_hours_ankle_wilcoxres <- rbind(cat_hours_ankle_wilcoxres, res_df)
+  
+}
+
+# manual look at the means 
+wk_child_day_ankle %>% 
+  filter(cat_hours=="< 72 hours") %>% 
+  summarise(mean(ECBQ_EFFCO_T30, na.rm=TRUE))
+
+wk_child_day_ankle %>% 
+  filter(cat_hours=="72 or more hours") %>% 
+  summarise(mean(ECBQ_EFFCO_T30, na.rm=TRUE))
+
+```
+
+## h. additional child characteristics (sex, childcare) and parent attributes (income to needs, education, age, stress)
+### table 3
+```{r}
+
+# df of demo and additional attributes  
+additional_attributes <- bands %>% 
+  select(S_ID, 
+         TC_AgeMonths_Home_T30, 
+         MCDI3_All_T30, #all 
+         MCDI3_Use_T30, #language only
+         PAS_AVG_T30,   #total anxiety
+         BIQ_Soc_T30,   
+         BIQ_Nov_T30, 
+         BIQ_Tot_T30,   #total 
+         ECBQ_dis_T30, 
+         ECBQ_NEGAF_T30, 
+         ECBQ_SURGE_T30, 
+         ECBQ_EFFCO_T30,
+         income2needs_T30, 
+         PC_matage_home_T30,
+         pc_ed,
+         PSI_Mn_T30,   #mean across all items
+         PSI_DC_T30)
+
+additional_attributes <- merge(demo_weartime, additional_attributes, by="S_ID")
+
+additional_attributes <- additional_attributes %>% 
+  select(-latino_hispanic, 
+         -race) %>% 
+  relocate(adult_hours, .after=PSI_DC_T30)
+
+# WILCOX RANK SUM for WRIST
+endpoints <- colnames(additional_attributes %>% select(TC_AgeMonths_Home_T30:adult_hours)) 
+
+# create dataframe to store results
+addatt_wrist_wilcoxres <- data.frame()
+
+# run for loop
+for (i in 1:length(endpoints)) {
+  
+  # assign a name to the endpoint variable.
+  endpoint <- endpoints[i]
+  
+  # calculate means for the two groups
+  means <- additional_attributes %>%
+    group_by(wrist_cat6day) %>%
+    summarise(mean_value = mean(get(endpoint), na.rm = TRUE)) %>%
+    pivot_wider(names_from = wrist_cat6day, values_from = mean_value, names_prefix = "mean_")
+  
+  # run Wilcoxon test and store in results dataframe.
+  res_df <- additional_attributes %>%
+    wilcox_test(as.formula(paste0(endpoint, "~ wrist_cat6day", sep = ""))) %>%
+    left_join(means, by = character()) %>% 
+    mutate(across(where(is.numeric), ~ round(.x, 3)))
+  
+  # bind results from this test with other tests in this loop
+  addatt_wrist_wilcoxres <- rbind(addatt_wrist_wilcoxres, res_df)
+  
+}
+
+addatt_wrist_wilcoxres
+
+is.numeric(addatt_wrist_wilcoxres$statistic)
+
+# WILCOX RANK SUM for ANKLE
+
+# create dataframe to store results
+addatt_ankle_wilcoxres <- data.frame()
+
+# run for loop
+for (i in 1:length(endpoints)) {
+  
+  # assign a name to the endpoint variable.
+  endpoint <- endpoints[i]
+  
+  # calculate means for the two groups
+  means <- additional_attributes %>%
+    group_by(ankle_cat6day) %>%
+    summarise(mean_value = mean(get(endpoint), na.rm = TRUE)) %>%
+    pivot_wider(names_from = ankle_cat6day, values_from = mean_value, names_prefix = "Mean_")
+  
+  # run Wilcoxon test and store in results dataframe.
+  res_df <- additional_attributes %>%
+    wilcox_test(as.formula(paste0(endpoint, "~ ankle_cat6day", sep = ""))) %>%
+    mutate(Variable = endpoint) %>%
+    left_join(means, by = character())
+  
+  # bind results from this test with other tests in this loop
+  addatt_ankle_wilcoxres <- rbind(addatt_ankle_wilcoxres, res_df)
+  
+}
+
+addatt_ankle_wilcoxres
+
+addatt_ankle_wilcoxres$statistic <- round(addatt_ankle_wilcoxres$statistic, digits = 3)
+
+# WRIST
+# check with the counts
+additional_attributes %>% group_by(wrist_cat6day) %>% count(wrist_cat6day)
+# mean age of the two groups
+additional_attributes %>% group_by(wrist_cat6day) %>% summarise(mean= mean(age))
+# sex distribution within the two groups
+additional_attributes %>% group_by(wrist_cat6day) %>% count(sex)
+
+# ANKLE
+# check 
+additional_attributes %>% group_by(ankle_cat6day) %>% count(ankle_cat6day)
+# mean age of the two groups
+additional_attributes %>% group_by(ankle_cat6day) %>% summarise(mean= mean(age))
+# sex distribution within the two groups
+additional_attributes %>% group_by(ankle_cat6day) %>% count(sex)
+
+
+
+## SEX IS CATEGORICAL VAR ##
+
+# assessing independence in the weartime groups by sex
+chisq_ankle_sex <- chisq.test(additional_attributes$sex, additional_attributes$ankle_cat_hours)
+format(round(chisq_ankle_sex$p.value, 3), nsmall = 3)
+
+chisq_wrist_sex <-chisq.test(additional_attributes$sex, additional_attributes$wrist_cat_hours)
+format(round(chisq_wrist_sex$p.value, 3), nsmall = 3)
+
+
+# creating new dataframe to do wilcox test comparing mean use of long sleeves/pants over the 7 day week
+sleeves_addatt <- sleeves_wrist %>% 
+  select(S_ID, sleeves_per_yes)
+
+sleeves_addatt <- merge(sleeves_addatt, additional_attributes, by="S_ID")
+
+sleeves_wilcox <- wilcox.test(data=sleeves_addatt, sleeves_per_yes ~ wrist_cat6day)
+format(round(sleeves_wilcox$p.value, 3), nsmall = 3)
+
+
+pants_addatt <- pants_ankle %>% 
+  select(S_ID, pants_per_yes)
+
+pants_addatt <- merge(pants_addatt, additional_attributes, by="S_ID")
+
+pants_wilcox <- wilcox.test(data=pants_addatt, pants_per_yes ~ ankle_cat6day)
+format(round(pants_wilcox$p.value, 3), nsmall = 3)
+
+### CORRELATIONS ###
+
+# parental stress and parent wear time (only wrist)
+# mean of PSI
+cor.test(wk_adult_day$PSI_Mn_T30, wk_adult_day$hours, method= "spearman")
+# difficult child
+cor.test(wk_adult_day$PSI_DC_T30, wk_adult_day$hours, method= "spearman")
+
+## child wrist and ankle wear time correlations with PSI are in respective dfs (corr_child_atttributesdaywear_ankle/ corr_child_atttributesdaywear_wrist)
+
+
+
+### INCOME TO NEEDS
+# wrist 
+cor.test(additional_attributes$income2needs_T30, additional_attributes$wrist_hours, method="spearman")
+
+# ankle
+cor.test(additional_attributes$income2needs_T30, additional_attributes$ankle_hours, method="spearman")
+
+
+
+### mat edu
+# wrist 
+cor.test(additional_attributes$pc_ed, additional_attributes$wrist_hours, method="spearman")
+
+# ankle 
+cor.test(additional_attributes$pc_ed, additional_attributes$ankle_hours, method="spearman")
+
+
+
+### MAT AGE
+# wrist 
+cor.test(additional_attributes$PC_matage_home_T30, additional_attributes$wrist_hours, method="spearman")
+
+# ankle
+cor.test(additional_attributes$PC_matage_home_T30, additional_attributes$ankle_hours, method="spearman")
+
+```
+
+## i. linear regression
+### 1. unadjusted (only attribute) 
+### 2. attribute and adjusted for age and sex
+```{r}
+
+regressiondf <- bands %>%  # attributes we found to be significantly different at p<0.05 between the low/mod and high wear time groups
+  select(S_ID, 
+         MCDI3_All_T30,    # wrist
+         PAS_AVG_T30,      # wrist
+         BIQ_Tot_T30,      # ankle
+         BIQ_Nov_T30,      # ankle
+         BIQ_Soc_T30,      # ankle
+         ECBQ_EFFCO_T30)   # ankle
+
+demo_weartime_reg <- demo_weartime %>% 
+  select(S_ID, sex, age, wrist_hours, ankle_hours)
+
+regressiondf <- merge(regressiondf, demo_weartime_reg, by="S_ID")
+
+## UNADJUSTED
+# WRIST
+
+## MCDI
+regression_wrist_mcdi <- lm(wrist_hours ~ MCDI3_All_T30,
+                       data=regressiondf)
+regression_wrist_mcdi_crudesumm <- summary(regression_wrist_mcdi)
+regression_wrist_mcdi_conf <- confint(regression_wrist_mcdi, level= 0.95)
+
+regression_wrist_mcdi_crudesumm
+regression_wrist_mcdi_conf
+
+## PAS
+regression_wrist_pas <- lm(wrist_hours ~ PAS_AVG_T30, 
+                       data=regressiondf)
+regression_wrist_pas_crudesumm <- summary(regression_wrist_pas)
+regression_wrist_pas_conf <- confint(regression_wrist_pas, level= 0.95)
+
+regression_wrist_pas_crudesumm
+regression_wrist_pas_conf
+
+
+
+# ANKLE 
+
+## ECBQ Effortful control
+regression_ankle_ecbq <- lm(ankle_hours ~ ECBQ_EFFCO_T30, 
+                       data=regressiondf)
+regression_ankle_ecbq_crudesumm <- summary(regression_ankle_ecbq)
+regression_ankle_ecbq_conf <- confint(regression_ankle_ecbq, level= 0.95)
+
+regression_ankle_ecbq_crudesumm
+regression_ankle_ecbq_conf
+
+## BIQ social 
+regression_ankle_biqsoc <- lm(ankle_hours ~ BIQ_Soc_T30, 
+                       data=regressiondf)
+regression_ankle_biqsoc_crudesumm <- summary(regression_ankle_biqsoc)
+regression_ankle_biqsoc_conf <- confint(regression_ankle_biqsoc, level= 0.95)
+
+regression_ankle_biqsoc_crudesumm
+regression_ankle_biqsoc_conf
+
+## BIQ novelty
+regression_ankle_biqnov <- lm(ankle_hours ~ BIQ_Nov_T30, 
+                       data=regressiondf)
+regression_ankle_biqnov_crudesumm <- summary(regression_ankle_biqnov)
+regression_ankle_biqnov_conf <- confint(regression_ankle_biqnov, level= 0.95)
+
+regression_ankle_biqnov_crudesumm
+regression_ankle_biqnov_conf
+
+## BIQ total
+regression_ankle_biqtot <- lm(ankle_hours ~ BIQ_Tot_T30, 
+                       data=regressiondf)
+regression_ankle_biqtot_cudesumm <- summary(regression_ankle_biqtot)
+regression_ankle_biqtot_conf <- confint(regression_ankle_biqtot, level= 0.95)
+
+regression_ankle_biqtot_cudesumm
+regression_ankle_biqtot_conf
+
+
+
+
+
+
+## ADJUSTED
+# WRIST
+
+## MCDI
+regression_wrist_mcdi <- lm(wrist_hours ~ MCDI3_All_T30 + age + sex,
+                       data=regressiondf)
+regression_wrist_mcdi_adjsumm <- summary(regression_wrist_mcdi)
+regression_wrist_mcdi_adjconf <- confint(regression_wrist_mcdi, level= 0.95)
+
+regression_wrist_mcdi_adjsumm
+regression_wrist_mcdi_adjconf
+
+## PAS
+regression_wrist_pas <- lm(wrist_hours ~ PAS_AVG_T30 + age + sex, 
+                       data=regressiondf)
+regression_wrist_pas_adjsumm <- summary(regression_wrist_pas)
+regression_wrist_pas_adjconf <- confint(regression_wrist_pas, level= 0.95)
+
+regression_wrist_pas_adjsumm
+regression_wrist_pas_adjconf
+
+
+
+# ANKLE 
+
+## ECBQ Effortful control
+regression_ankle_ecbq <- lm(ankle_hours ~ ECBQ_EFFCO_T30 + age + sex, 
+                       data=regressiondf)
+regression_ankle_ecbq_adjsumm <- summary(regression_ankle_ecbq)
+regression_ankle_ecbq_adjconf <- confint(regression_ankle_ecbq, level= 0.95)
+
+regression_ankle_ecbq_adjsumm
+regression_ankle_ecbq_adjconf
+
+## BIQ social 
+regression_ankle_biqsoc <- lm(ankle_hours ~ BIQ_Soc_T30 + age + sex, 
+                       data=regressiondf)
+regression_ankle_biqsoc_adjsumm <- summary(regression_ankle_biqsoc)
+regression_ankle_biqsoc_adjconf <- confint(regression_ankle_biqsoc, level= 0.95)
+
+regression_ankle_biqsoc_adjsumm
+regression_ankle_biqsoc_adjconf
+
+## BIQ novelty
+regression_ankle_biqnov <- lm(ankle_hours ~ BIQ_Nov_T30 + age + sex, 
+                       data=regressiondf)
+regression_ankle_biqnov_adjsumm <- summary(regression_ankle_biqnov)
+regression_ankle_biqnov_adjconf <- confint(regression_ankle_biqnov, level= 0.95)
+
+regression_ankle_biqnov_adjsumm
+regression_ankle_biqnov_adjconf
+
+## BIQ total
+regression_ankle_biqtot <- lm(ankle_hours ~ BIQ_Tot_T30 + age + sex, 
+                       data=regressiondf)
+regression_ankle_biqtot_adjsumm <- summary(regression_ankle_biqtot)
+regression_ankle_biqtot_adjconf <- confint(regression_ankle_biqtot, level= 0.95)
+
+regression_ankle_biqtot_adjsumm
+regression_ankle_biqtot_adjconf
+
+```
+
+# RQ3: WHAT RECOMMENDATIONS CAN WE PROVIDE TO IMPROVE COMPLIANCE AND PARTICIPANT EXPERIENCES FOR FUTURE STUDIES?
+
+## a. issues
+```{r}
+
+# issues with the bands from the qualitative, write-in question for the band diary
+issues_nobwb <- issues %>% 
+  select(-contains("bwb"))
+
+demo_issues_weartime <- merge(demo_weartime, issues_nobwb, by="S_ID", all.x= TRUE) 
+
+demo_issues_weartime_long <- demo_issues_weartime %>% 
+  filter(!is.na(Size)) %>% # those with missing for size, missing for all
+  select(-ankle_cat6day, -wrist_cat6day, 
+         -adult_hours, -latino_hispanic, -race, -ankle_cat_hours, -wrist_cat_hours) %>% #relevant variables
+  pivot_longer(!c(S_ID, ankle_hours, wrist_hours, combined_total, ankle_cathours, wrist_cathours, age, sex), names_to = "issue", values_to = "present") 
+
+sum_issues <- demo_issues_weartime_long %>% 
+  group_by(issue) %>% 
+  summarise(sum=sum(present))
+
+issues_long <- issues_nobwb %>% 
+  pivot_longer(!S_ID, names_to = "type", values_to = "present") %>% 
+  filter(present==1) #to include only those that had an issue (no 0s)
+
+
+sum_issues_bar <- issues_long %>% 
+  ggplot(aes(x=type)) +
+  geom_bar(stat= "count", fill= "darkgreen") 
+
+sum_issues_bar
+
+
+demo_issues_weartime <- demo_issues_weartime %>% 
+  filter(!is.na(Size)) %>% 
+  select(-ankle_cat_hours, -wrist_cat_hours, -wrist_cathours, -ankle_cathours)
+
+# are the same people leaving comments?
+demo_issues_weartime$composite_comments <- rowSums(demo_issues_weartime[, c(12:18, 20:21)], na.rm=TRUE) #column 19 is no notes
+demo_issues_weartime$composite_nopos <- rowSums(demo_issues_weartime[, c(12:15,17, 18, 20, 21)], na.rm=TRUE)
+                                                                            #removes column 16 (positive) and 19 (no notes)
+
+demo_issues_weartime %>% count(composite_comments) #including the positive comments
+
+demo_issues_weartime %>% count(composite_nopos) #not including the positive comments, only issues
+
+# sample size for 3 and 4 comments is a bit small, going to look at wear time based on 0, 1, and 2 or more comments
+demo_issues_weartime <- demo_issues_weartime %>% 
+  mutate(comment_cat = case_when(composite_nopos == 0 ~ "0", 
+                                composite_nopos == 1 ~ "1",
+                                composite_nopos == 2 ~ "2 or more", 
+                                  composite_nopos == 3 ~ "2 or more",
+                                  composite_nopos == 4  ~ "2 or more"
+                                ))
+demo_issues_weartime %>% 
+  count(comment_cat)
+
+
+# issues to wrist hours
+issues_wrist_box <- ggplot(demo_issues_weartime, aes(x=comment_cat, y=wrist_hours, fill=comment_cat)) +
+  geom_boxplot( outlier.shape = NA, fill= "orange") +
+  labs(title= "Daytime Wristband Wear by Number of Issues") +
+  ylab("Day Time Wrist Hours") +
+  xlab("Number of Issues") +
+  geom_jitter(size=0.3, alpha= 0.9, position = position_jitterdodge(0.07)) + 
+  stat_kruskal_test(label= "Kruskal-Wallis, p = {p.format}", label.y= 86) 
+ 
+issues_wrist_box
+
+# kruskal wallis test for multiple comparisons
+kruskal.test(wrist_hours ~ comment_cat, data= demo_issues_weartime)
+
+# post hoc test for multiple comparisons (dunn's test)
+dunnTest(wrist_hours ~ comment_cat, data=demo_issues_weartime, 
+         method="bonferroni")
+
+
+issues_ankle_box <- ggplot(demo_issues_weartime, aes(x=comment_cat, y=ankle_hours, fill=comment_cat)) +
+  geom_boxplot( outlier.shape = NA, fill= "cornflowerblue") +
+  labs(title= "Daytime Ankleband Wear by Number of Issues") +
+  ylab("Day Time Ankle Hours") +
+  xlab("Number of Issues") +
+  geom_jitter(size=0.3, alpha= 0.9, position = position_jitterdodge(0.07)) + 
+  stat_kruskal_test(label= "Kruskal-Wallis, p = {p.format}", label.y= 86) 
+ 
+issues_ankle_box
+
+kruskal.test(ankle_hours ~ comment_cat, data= demo_issues_weartime)
+
+# post hoc test for multiple comparisons (dunn's test)
+dunnTest(ankle_hours ~ comment_cat, data=demo_issues_weartime, 
+         method="bonferroni")
+
+
+
+
+
+
+ankle_issues_weartime <- demo_issues_weartime %>% 
+  select(-wrist_hours) %>% #keep everything but the wrist wear time
+  rename("hours"= "ankle_hours") %>% 
+  mutate(position= "ankle")
+
+wrist_issues_weartime <- demo_issues_weartime %>% 
+  select(-ankle_hours) %>%
+  rename("hours"= "wrist_hours") %>% 
+  mutate(position= "wrist")
+
+position_issues_weartime <- rbind(ankle_issues_weartime, wrist_issues_weartime)
+
+## paired
+issues_byposition <- ggplot(position_issues_weartime, aes(x=comment_cat, y=hours, fill=position)) +
+  geom_boxplot(alpha= 1, outlier.shape = NA) +
+  scale_fill_manual(values = c("wrist" = "orange", 
+                               "ankle" = "cornflowerblue")) +
+  labs(title= "Daytime Band Wear by Number of Issues") +
+  ylab("Day Time Hours") +
+  xlab("Number of Comments") +
+  geom_jitter(size=0.3, alpha= 0.9, position = position_jitterdodge(0.07)) +
+  stat_compare_means(method = "wilcox.test", paired = TRUE,
+                      label.y = 90, size = 5)
+
+issues_byposition
+
+
+issues_wrist_bysex <- ggplot(demo_issues_weartime, aes(x=comment_cat, y=wrist_hours, fill=sex)) +
+  geom_boxplot(alpha= 1, outlier.shape = NA) +
+  scale_fill_manual(values = c("F" = "darkorange", 
+                               "M" = "aquamarine3")) +
+  labs(title= "Daytime Wristband Wear by Number of Issues (by sex)") +
+  ylab("Day Time Wrist Hours") +
+  xlab("Number of Comments") +
+  geom_jitter(size=0.3, alpha= 0.9, position = position_jitterdodge(0.07)) +
+  stat_compare_means(method = "wilcox.test",
+                      label.y = 90, size = 5)
+  
+issues_wrist_bysex
+
+
+issues_ankle_bysex <- ggplot(demo_issues_weartime, aes(x=comment_cat, y=ankle_hours, fill=sex)) +
+  geom_boxplot(alpha= 1, outlier.shape = NA) +
+  scale_fill_manual(values = c("F" = "darkorange", 
+                               "M" = "aquamarine3")) +
+  labs(title= "Daytime Ankle Band Wear by Number of Issues (by sex)") +
+  ylab("Day Time Ankle Hours") +
+  xlab("Number of Comments") +
+  geom_jitter(size=0.3, alpha= 0.9, position = position_jitterdodge(0.07)) +
+  stat_compare_means(method = "wilcox.test",
+                      label.y = 90, size = 5)
+  
+issues_ankle_bysex
+
+```
+
+
+Random forest code by allison spring 
+```{r}
+
+set.seed(12)
+
+# random forest
+randomforest_demo_data <- data %>%
+  filter(!S_ID == 1114, 
+         !S_ID == 1219, 
+         !S_ID == 1023, 
+         !S_ID == 2003, 
+         !S_ID == 1015, 
+         !S_ID == 1097) %>%  
+  #select(S_ID:tc_race_other) %>%
+  select(S_ID, TC_AgeMonths_Home_T30,PC_matage_home_T30,TC_Female,income2needs_T30,pc_ed) %>%
+  #select(-c(box_wrist, inventorynotes_wrist, returned_wrist, returned_ankle, box_ankle, inventorynotes_ankle, Complete_Home_T30, GADays_Home_T30)) %>%
+  rename("child_age_months_t30" = "TC_AgeMonths_Home_T30", 
+         "mat_age_t30" = "PC_matage_home_T30","child_sex"="TC_Female","Maternal_Education"="pc_ed")
+
+
+
+#Merge the parent and child characteristics with total number of hours worn
+randomforest_data <- merge(attributes_weartimetotals, randomforest_demo_data, by="S_ID")%>%
+  select(-c("parent_parentwrist_nighttotal","child_wrist_wktotal","child_ankle_wktotal","child_ankle_nighttotal","parent_parentwrist_wktotal", "S_ID")) %>%
+  rename("PSI_Total_Parenting_Stress"="PSI_Mn_T30")%>%
+  rename("PSI_Parenting_Stress_for_a_Difficult_Child"="PSI_DC_T30")%>%
+  rename("MCDI_Overall_Language"="MCDI3_All_T30")%>%
+  rename("ECBQ_Discomfort"="ECBQ_dis_T30")%>%
+  rename("ECBQ_Effortful_Control"="ECBQ_EFFCO_T30")%>%
+  rename("ECBQ_Negative_Affect"="ECBQ_NEGAF_T30")%>%
+  rename("BIQ_Inhibition_to_Situational_Novelty"="BIQ_Nov_T30")%>%
+  rename("BIQ_Total_Behavioral_Inhibition"="BIQ_Tot_T30")%>%
+  rename("BIQ_Inhibition_to_Social_Situations"="BIQ_Soc_T30")%>%
+  rename("PAS_Total_Anxiety"="PAS_AVG_T30")%>%
+  rename("Parent_Wristband"="parent_parentwrist_daytotal")%>%
+  rename("Child_Sex"="child_sex")%>%
+  rename("Family_Income_to_Needs_Ratio"="income2needs_T30")%>%
+  rename("Maternal_Education"="Maternal_Education")%>%
+  rename("Maternal_Age"="mat_age_t30")%>%
+  rename("Child_Age"="child_age_months_t30")%>%
+  rename("ECBQ_Surgency"="ECBQ_SURGE_T30")
+
+
+
+
+
+#Complete Cases
+randomforest_data_complete_cases <- randomforest_data[complete.cases(randomforest_data), ]
+
+
+ankle<-randomforest_data_complete_cases[,c(-12)]#Remove S_ID and wrist
+wrist<-randomforest_data_complete_cases[,c(-13)] #Remove S_ID and ankle
+
+# 5-fold cross validation
+index = createFolds(wrist$child_wrist_daytotal, k = 5) 
+
+# Seeing if about 20% of the records are in the testing set
+kfold1 = index[[1]]
+length(kfold1)/nrow(wrist)
+
+# Creating vectors for parameters to be tuned
+ntree_values = c(50, 250, 500) # number of decision trees 
+p = dim(wrist)[2] - 1 # number of predictor variables in the dataset
+mtry_values = c(sqrt(p), p/2, p) # number of predictors to be used in the model
+
+
+# Creating an empty dataframe to save the confusion matrix metrics and variable importance
+metrics = data.frame()
+variable_importance_df = data.frame()
+
+# Iterating through the cross validation folds
+for (i in 1:length(index)){
+  # Training data
+  data_train = wrist[-index[[i]],]
+  
+  # Test data
+  data_test = wrist[index[[i]],]
+  
+  
+  # Creating empty lists and dataframes to store errors 
+  reg_rf_pred_tune = list()
+  rf <-randomForest(child_wrist_daytotal~.,data=wrist, ntree=500) 
+  mtry <- tuneRF(wrist[-13],wrist$child_wrist_daytotal, ntreeTry=500,
+                 stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+  best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+  
+  
+  # Now running RF on the entire training set with the tuned parameters
+  # This will be done 5 times for each fold
+  reg_rf <- randomForest(child_wrist_daytotal ~ ., data = data_train,
+                         ntree = 500,
+                         mtry = best.m)
+  
+  # Predicting on test set and adding the predicted values as an additional column to the test data
+  data_test$wear_cat=case_when(data_test$child_wrist_daytotal<72~"L",
+                               TRUE~"H")
+  data_test$wear_cat=as.factor(data_test$wear_cat)
+  data_test$Pred = predict(reg_rf, newdata = data_test, type = "response")
+  data_test$Pred_cat=case_when(data_test$Pred<72~"L",
+                               TRUE~"H")
+  data_test$Pred_cat=as.factor(data_test$Pred_cat)
+  levels(data_test$wear_cat) <- c("L", "H")
+  levels(data_test$Pred_cat) <- c("L", "H")
+  matrix = confusionMatrix(data = data_test$Pred_cat, 
+                           reference = data_test$wear_cat)
+  # Extracting accuracy, sens, spec, PPV, NPV and adding to the dataframe to take mean later
+  matrix_values = data.frame(t(c(matrix$byClass[11])), t(c(matrix$byClass[1:4])))
+  metrics = rbind(metrics, matrix_values)
+  
+  # Extracting variable importance
+  variable_importance_values = data.frame(importance(reg_rf)) %>%
+    rownames_to_column(var = "Predictor")
+  variable_importance_df = rbind(variable_importance_df, variable_importance_values)
+}
+
+# Taking average across the 5 folds
+metrics = metrics %>%
+  summarise(`Balanced Accuracy` = mean(Balanced.Accuracy), Sensitivity = mean(Sensitivity), 
+            Specificity = mean(Specificity), PPV = mean(Pos.Pred.Value), NPV = mean(Neg.Pred.Value,rm.na=TRUE))
+
+variable_importance_df = variable_importance_df %>%
+  group_by(Predictor) %>%
+  summarise(MeanDecreaseGini = mean(IncNodePurity)) %>%
+  # Sorting from highest to lowest
+  arrange(-MeanDecreaseGini)
+
+variable_importance_df
+# Adding spaces between the variables that need the space
+modified_variable_importance_df = variable_importance_df %>%
+  mutate(Predictor = gsub("_", " ", Predictor))
+
+# Saving the order of the variables from lowest to highest mean decrease gini by putting into a factor
+predictor_order = rev(modified_variable_importance_df$Predictor)
+modified_variable_importance_df$Predictor = factor(modified_variable_importance_df$Predictor, 
+                                                   levels = predictor_order)
+
+head(modified_variable_importance_df)
+ggplot(data = modified_variable_importance_df , 
+       aes(x = MeanDecreaseGini, y = Predictor, size = 2)) + 
+  geom_point() + 
+  theme_light() + 
+  theme(axis.line = element_line(color = "black"), #making x and y axes black
+        axis.text = element_text(size = 12), #changing size of x axis labels
+        axis.title = element_text(face = "bold", size = rel(1.7)), #changes axis titles
+        legend.title = element_text(face = 'bold', size = 14), #changes legend title
+        legend.text = element_text(size = 12), #changes legend text
+        strip.text.x = element_text(size = 15, face = "bold"), #changes size of facet x axis 
+        strip.text.y = element_text(size = 15, face = "bold")) + #changes size of facet y axis 
+  labs(x = 'Importance on Wrist Wear Time', y = ' Predictor Variable') + #changing axis labels 
+  guides(size = "none")#removing size legend
+
+
+################################################################################
+index = createFolds(ankle$child_ankle_daytotal, k = 5) 
+
+# Seeing if about 20% of the records are in the testing set
+kfold1 = index[[1]]
+length(kfold1)/nrow(ankle)
+
+# Creating vectors for parameters to be tuned
+ntree_values = c(50, 250, 500) # number of decision trees 
+p = dim(ankle)[2] - 1 # number of predictor variables in the dataset
+mtry_values = c(sqrt(p), p/2, p) # number of predictors to be used in the model
+
+
+# Creating an empty dataframe to save the confusion matrix metrics and variable importance
+metrics = data.frame()
+variable_importance_df = data.frame()
+
+# Iterating through the cross validation folds
+for (i in 1:length(index)){
+  # Training data
+  data_train = ankle[-index[[i]],]
+  
+  # Test data
+  data_test = ankle[index[[i]],]
+  
+  #data_test$child_ankle_wktotal <- factor(data_test$child_ankle_wktotal)
+  
+  
+  # Creating empty lists and dataframes to store errors 
+  reg_rf_pred_tune = list()
+  rf <-randomForest(child_ankle_daytotal~.,data=ankle, ntree=500) 
+  mtry <- tuneRF(ankle[-13],ankle$child_ankle_daytotal, ntreeTry=500,
+                 stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+  best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+  
+  # Tuning parameters: using ntree and mtry values to determine which combination yields the smallest OOB error 
+  # from the validation datasets
+  
+  # Now running RF on the entire training set with the tuned parameters
+  # This will be done 5 times for each fold
+  reg_rf <- randomForest(child_ankle_daytotal ~ ., data = data_train,
+                         ntree = 500,
+                         mtry = best.m)
+  
+  # Predicting on test set and adding the predicted values as an additional column to the test data
+  data_test$wear_cat=case_when(data_test$child_ankle_daytotal<72~"L",
+                               TRUE~"H")
+  data_test$wear_cat=as.factor(data_test$wear_cat)
+  data_test$Pred = predict(reg_rf, newdata = data_test, type = "response")
+  data_test$Pred_cat=case_when(data_test$Pred<72~"L",
+                               TRUE~"H")
+  data_test$Pred_cat=as.factor(data_test$Pred_cat)
+  levels(data_test$wear_cat) <- c("L", "H")
+  levels(data_test$Pred_cat) <- c("L", "H")
+  matrix = confusionMatrix(data = data_test$Pred_cat, 
+                           reference = data_test$wear_cat)
+  # Extracting accuracy, sens, spec, PPV, NPV and adding to the dataframe to take mean later
+  matrix_values = data.frame(t(c(matrix$byClass[11])), t(c(matrix$byClass[1:4])))
+  metrics = rbind(metrics, matrix_values)
+  
+  # Extracting variable importance
+  variable_importance_values = data.frame(importance(reg_rf)) %>%
+    rownames_to_column(var = "Predictor")
+  variable_importance_df = rbind(variable_importance_df, variable_importance_values)
+}
+
+# Taking average across the 5 folds
+metrics = metrics %>%
+  summarise(`Balanced Accuracy` = mean(Balanced.Accuracy), Sensitivity = mean(Sensitivity), 
+            Specificity = mean(Specificity), PPV = mean(Pos.Pred.Value), NPV = mean(Neg.Pred.Value))
+
+#Variable importance is a reflection of how much the performance of the model decreases when the variable is removed
+variable_importance_df = variable_importance_df %>%
+  group_by(Predictor) %>%
+  summarise(MeanDecreaseGini = mean(IncNodePurity)) %>%
+  #summarise(MeanDecreaseGini_std = stdev(IncNodePurity)) %>%
+  # Sorting from highest to lowest
+  arrange(-MeanDecreaseGini)
+
+variable_importance_df
+# Adding spaces between the variables that need the space
+modified_variable_importance_df = variable_importance_df %>%
+  mutate(Predictor = gsub("_", " ", Predictor))
+
+# Saving the order of the variables from lowest to highest mean decrease gini by putting into a factor
+predictor_order = rev(modified_variable_importance_df$Predictor)
+modified_variable_importance_df$Predictor = factor(modified_variable_importance_df$Predictor, 
+                                                   levels = predictor_order)
+
+head(modified_variable_importance_df)
+
+ggplot(data = modified_variable_importance_df , 
+       aes(x = MeanDecreaseGini, y = Predictor, size = 2)) + 
+  geom_point() + 
+  
+  theme_light() + 
+  theme(axis.line = element_line(color = "black"), #making x and y axes black
+        axis.text = element_text(size = 12), #changing size of x axis labels
+        axis.title = element_text(face = "bold", size = rel(1.7)), #changes axis titles
+        legend.title = element_text(face = 'bold', size = 14), #changes legend title
+        legend.text = element_text(size = 12), #changes legend text
+        strip.text.x = element_text(size = 15, face = "bold"), #changes size of facet x axis 
+        strip.text.y = element_text(size = 15, face = "bold")) + #changes size of facet y axis 
+  labs(x = 'Importance on Ankle Wear Time', y = ' Predictor Variable') + #changing axis labels 
+  
+  guides(size = "none")#removing size legend
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+maunscript plots
+
+FIGURE 1-- box plot of child wrist and ankle band wear time by day and night time 
+```{r}
+
+figure1 <- ggplot(wksumsep, aes(x=day, y=hours, fill=position)) +
+  geom_boxplot(outlier.shape = NA, lwd=1, alpha=1) +
+  geom_jitter(size=1.5, position = position_jitterdodge(0.2)) +
+  stat_compare_means(method = "wilcox.test",
+                     paired= TRUE,
+                     # Changing the value to asterisks and moving to the middle of the plot
+                     label = "p.signif", label.x.npc = "center", size = 12) +
+  scale_fill_manual(values = c("Child Ankle" = "lavender", 
+                               "Child Wrist" = "#9999CC")) +
+  # Adding padding y axis 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.3, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Total Hours") +
+  xlab("Time of Day")
+  
+figure1
+
+jpeg("2_OutputGraphs/raw/figure1.jpeg",
+    width = 7, height = 5, units="in", res=1200)
+figure1
+invisible(dev.off())
+
+```
+FIGURE 2 was generated in powerpoint and illustrator
+
+FIGURE 3 
+boxplots with time of day (x) by total wear hours (y) 
+including paired wilcox comparing wrist (dark) by ankle (light)
+```{r}
+# change the name of the 
+demo_weartime_sep <- demo_weartime_sep %>% 
+  mutate(position2=case_when(position == "ankle" ~ "Child Ankle", 
+                            position == "wrist" ~ "Child Wrist"))
+
+
+# paired, stratified by sex
+figure3 <- ggplot(demo_weartime_sep, aes(x=sex, y=hours, fill= position2)) + 
+  geom_boxplot(outlier.shape = NA, lwd=1, alpha=1) +
+  geom_jitter(size=1.5, position = position_jitterdodge(0.2)) +
+  stat_compare_means(method = "wilcox.test",
+                     paired= TRUE,
+                     # Changing the value to asterisks and moving to the middle of the plot
+                     label = "p.signif", label.x.npc = "center", size = 12) +
+  scale_fill_manual(values = c("Child Ankle" = "lavender", 
+                               "Child Wrist" = "#9999CC")) +
+  scale_x_discrete(labels = c("Female", "Male")) +
+  # Adding padding y axis 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.3, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Total Daytime Hours") +
+  xlab("Sex")
+  
+figure3
+
+
+
+jpeg("2_OutputGraphs/raw/figure3.jpeg",
+    width = 7, height = 5, units="in", res=1200)
+figure3
+invisible(dev.off())
+
+```
+
+FIGURE 4
+select attributes for wristband
+boxplots with categorized hours (x) by attribute scale (y) and wilcox test
+scatter plots with total daytime hours (x) and attribute scale (y) and spearman correlation
+attributes included: PAS and MCDI
+```{r}
+
+#separate wrist plots to be combined with patchwork
+long_wk_child_day_wrist_pas <- long_wk_child_day %>% 
+  filter(attribute== "PAS_AVG_T30", 
+         position== "wrist")
+
+#boxplot comparing categorized weartime (wilcox rank sum test)
+figure4_pas <- ggplot(long_wk_child_day_wrist_pas, aes(x=cat_hours, y=value, fill=cat_hours)) +
+  geom_boxplot(outlier.shape = NA, lwd=1, alpha=1, position= position_dodge(width=5)) +
+  geom_jitter(size=1.5, position = position_jitterdodge(0.3)) +
+  stat_compare_means(method = "wilcox.test",
+                     # Changing the value to asterisks and moving to the middle of the plot
+                     label = "p.signif", label.x.npc = "center", size = 12) +
+  scale_fill_manual(values = c("< 72 hours" = "#f8c198", 
+                               "72 or more hours" = "#e26f1a")) +
+  scale_x_discrete(labels = c("<72 Hours", "≥72 Hours")) +
+  # Adding padding y axis 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.1, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Categorized Hours") +
+  labs(title= "PAS: Average\nTwo-Group Comparison",
+       subtitle= "(p = 0.038)") 
+
+figure4_pas
+
+#jpeg("2_OutputGraphs/raw/figure4_pas.jpeg",
+#    width = 160, height = 300, res=1000)
+#figure4_pas
+#invisible(dev.off())
+
+
+
+
+#scatter with spearman correlation
+figure4_pas_scat <- ggplot(long_wk_child_day_wrist_pas, aes(x=hours, y=value)) + 
+  geom_point(size= 1.5) + 
+  geom_smooth(method="lm", se=F, size=1.5, color="#e26f1a", linetype="dashed") +
+  scale_shape_manual(values= c(16)) +
+  #stat_cor(method = "spearman", label.x=c(3,5), label.y=c(0.7,0.75), size=10, face="bold") + 
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.1, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Total Daytime Hours") + 
+  labs(title= "PAS: Average\nCorrelation",
+    subtitle= "(rho = 0.19, p = 0.085)")
+
+figure4_pas_scat
+
+
+#jpeg("2_OutputGraphs/raw/figure4_pas_scat.jpeg",
+#    width = 2000, height = 2000)
+#figure4_pas_scat
+#invisible(dev.off())
+
+
+
+#mcdi
+long_wk_child_day_wrist_mcdi <- long_wk_child_day %>% 
+  filter(attribute== "MCDI3_All_T30", 
+         position== "wrist")
+
+
+figure4_mcdi <- ggplot(long_wk_child_day_wrist_mcdi, aes(x=cat_hours, y=value, fill=cat_hours)) +
+  geom_boxplot(outlier.shape = NA, lwd=1, alpha=1, position= position_dodge(width=5)) +
+  geom_jitter(size=1.5, position = position_jitterdodge(0.3)) +
+  stat_compare_means(method = "wilcox.test",
+                     # Changing the value to asterisks and moving to the middle of the plot
+                     label = "p.signif", label.x.npc = "center", size = 12) +
+  scale_fill_manual(values = c("< 72 hours" = "#acdaa6", 
+                               "72 or more hours" = "#387830")) +
+  scale_x_discrete(labels = c("<72 Hours", "≥72 Hours")) +
+  # Adding padding y axis 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.1, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Categorized Hours") +
+  labs(title= "MCDI: Overall Language\nTwo-Group Comparison",
+       subtitle= "(p = 0.015)") 
+
+figure4_mcdi
+
+#jpeg("2_OutputGraphs/raw/figure4_mcdi.jpeg",
+#    width = 1600, height = 2800)
+#figure4_mcdi
+#invisible(dev.off())
+
+
+
+
+#scatter
+figure4_mcdi_scat <- ggplot(long_wk_child_day_wrist_mcdi, aes(x=hours, y=value)) + 
+  geom_point(size= 1.5) + 
+  geom_smooth(method="lm", se=F, size=1.5, color="#387830", linetype="dashed") +
+  scale_shape_manual(values= c(16)) +
+  #stat_cor(method = "spearman", label.x=c(3,5), label.y=c(0.7,0.75), size=10, face="bold") + 
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.1, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Total Daytime Hours") + 
+  labs(title= "MCDI: Overall Language\nCorrelation",
+    subtitle= "(rho = 0.26, p = 0.010)")
+
+figure4_mcdi_scat
+
+
+#jpeg("2_OutputGraphs/raw/figure4_mcdi_scat.jpeg",
+#    width = 2000, height = 2000)
+#figure4_mcdi_scat
+#invisible(dev.off())
+
+
+
+#combine the FOUR plots to make final figure 
+figure4 <-  figure4_mcdi + figure4_pas + figure4_mcdi_scat + figure4_pas_scat + 
+  plot_layout(ncol=2, heights = c(2, 1)) + plot_annotation(tag_levels = "a", tag_prefix = "(", tag_suffix = ")") &
+  theme(plot.tag = element_text(size = 18, face = "bold", ))
+
+
+figure4
+
+jpeg("2_OutputGraphs/figure4.jpeg",
+    width = 9, height = 9, units="in", res=1200)
+figure4
+invisible(dev.off())
+
+
+
+```
+
+FIGURE 5
+select attributes for ankle band
+boxplots with categorized hours (x) by attribute scale (y) and wilcox test
+scatter plots with total daytime hours (x) and attribute scale (y) and spearman correlation
+attributes included: PAS and MCDI
+```{r}
+
+#figure 4 individual plots (ankle)
+
+#set up 
+long_wk_child_day_ankle_biq_nov <- long_wk_child_day %>% 
+  filter(attribute== "BIQ_Nov_T30", 
+         position== "ankle")
+
+long_wk_child_day_ankle_biq_soc <- long_wk_child_day %>% 
+  filter(attribute== "BIQ_Soc_T30", 
+         position== "ankle")
+
+long_wk_child_day_ankle_biq_tot <- long_wk_child_day %>% 
+  filter(attribute== "BIQ_Tot_T30", 
+         position== "ankle")
+
+long_wk_child_day_ankle_ecbq_effco <- long_wk_child_day %>% 
+  filter(attribute== "ECBQ_EFFCO_T30", 
+         position== "ankle")
+
+
+## FIRST COLUMN ##
+
+#ankle: biq novelty 
+figure5_biq_nov <- ggplot(long_wk_child_day_ankle_biq_nov, aes(x=cat_hours, y=value, fill=cat_hours)) +
+  geom_boxplot(outlier.shape = NA, lwd=1, alpha=1, position= position_dodge(width=5)) +
+  geom_jitter(size=1.5, position = position_jitterdodge(0.3)) +
+  stat_compare_means(method = "wilcox.test",
+                     # Changing the value to asterisks and moving to the middle of the plot
+                     label = "p.signif", label.x.npc = "center", size = 12) +
+  scale_fill_manual(values = c("< 72 hours" = "#acdaa6", 
+                               "72 or more hours" = "#387830")) +
+  scale_x_discrete(labels = c("<72 Hours", "≥72 Hours")) +
+  # Adding padding y axis 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.1, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Categorized Hours") +
+  labs(title= "BIQ: Novelty\nTwo-Group Comparison",
+       subtitle= "(p = 0.003)")
+  
+  
+figure5_biq_nov
+
+
+#scatter
+figure5_biq_nov_scat <- ggplot(long_wk_child_day_ankle_biq_nov, aes(x=hours, y=value)) + 
+  geom_point(size= 1.5) + 
+  geom_smooth(method="lm", se=F, size=1.5, color="#387830", linetype="dashed") +
+  scale_shape_manual(values= c(16)) +
+  #stat_cor(method = "spearman", label.x=c(3,5), label.y=c(0.7,0.75), size=10, face="bold") + 
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.1, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Total Daytime Hours") + 
+  labs(title= "BIQ: Novelty\nCorrelation",
+    subtitle= "(rho = 0.31, p = 0.002)")
+
+figure5_biq_nov_scat
+
+
+
+
+
+
+
+
+
+
+
+
+
+## COLUMN 2 ##
+
+#ankle: biq social 
+figure5_biq_soc <- ggplot(long_wk_child_day_ankle_biq_soc, aes(x=cat_hours, y=value, fill=cat_hours)) +
+  geom_boxplot(outlier.shape = NA, lwd=1, alpha=1, position= position_dodge(width=5)) +
+  geom_jitter(size=1.5, position = position_jitterdodge(0.3)) +
+  stat_compare_means(method = "wilcox.test",
+                     # Changing the value to asterisks and moving to the middle of the plot
+                     label = "p.signif", label.x.npc = "center", size = 12) +
+  scale_fill_manual(values = c("< 72 hours" = "#f8c198", 
+                               "72 or more hours" = "#e26f1a")) +
+  scale_x_discrete(labels = c("<72 Hours", "≥72 Hours")) +
+  # Adding padding y axis 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.1, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Categorized Hours") +
+  labs(title= "BIQ: Social\nTwo-Group Comparison",
+       subtitle= "(p = 0.001)")
+
+figure5_biq_soc
+
+
+
+figure5_biq_soc_scat <- ggplot(long_wk_child_day_ankle_biq_soc, aes(x=hours, y=value)) + 
+  geom_point(size= 1.5) + 
+  geom_smooth(method="lm", se=F, size=1.5, color="#e26f1a", linetype="dashed") +
+  scale_shape_manual(values= c(16)) +
+  #stat_cor(method = "spearman", label.x=c(3,5), label.y=c(0.7,0.75), size=10, face="bold") + 
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.1, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Total Daytime Hours") + 
+  labs(title= "BIQ: Social\nCorrelation",
+    subtitle= "(rho = 0.35, p < 0.001)")
+  
+  
+  
+figure5_biq_soc_scat
+
+
+
+
+
+
+
+
+
+
+
+# COLUMN 3 ##
+
+
+#ankle: biq total 
+figure5_biq_tot <- ggplot(long_wk_child_day_ankle_biq_tot, aes(x=cat_hours, y=value, fill=cat_hours)) +
+  geom_boxplot(outlier.shape = NA, lwd=1, alpha=1, position= position_dodge(width=5)) +
+  geom_jitter(size=1.5, position = position_jitterdodge(0.3)) +
+  stat_compare_means(method = "wilcox.test",
+                     # Changing the value to asterisks and moving to the middle of the plot
+                     label = "p.signif", label.x.npc = "center", size = 12) +
+  scale_fill_manual(values = c("< 72 hours" = "#dbabf0", 
+                               "72 or more hours" = "#af69cd")) +
+  scale_x_discrete(labels = c("<72 Hours", "≥72 Hours")) +
+  # Adding padding y axis 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.1, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Categorized Hours") +
+  labs(title= "BIQ: Total\nTwo-Group Comparison",
+       subtitle= "(p = 0.001)")
+  
+figure5_biq_tot
+
+
+
+#scatter
+figure5_biq_tot_scat <- ggplot(long_wk_child_day_ankle_biq_tot, aes(x=hours, y=value)) + 
+  geom_point(size= 1.5) + 
+  geom_smooth(method="lm", se=F, size=1.5, color="#af69cd", linetype="dashed") +
+  scale_shape_manual(values= c(16)) +
+  #stat_cor(method = "spearman", label.x=c(3,5), label.y=c(0.7,0.75), size=10, face="bold") + 
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.1, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Total Daytime Hours") + 
+  labs(title= "BIQ: Total\nCorrelation",
+    subtitle= "(rho = 0.34, p < 0.001)")
+
+figure5_biq_tot_scat
+
+
+
+
+# COLUMN 4 ##
+
+#ankle: ecbq effco
+figure5_ecbq_effco <- ggplot(long_wk_child_day_ankle_ecbq_effco, aes(x=cat_hours, y=value, fill=cat_hours)) +
+  geom_boxplot(outlier.shape = NA, lwd=1, alpha=1, position= position_dodge(width=5)) +
+  geom_jitter(size=1.5, position = position_jitterdodge(0.3)) +
+  stat_compare_means(method = "wilcox.test",
+                     # Changing the value to asterisks and moving to the middle of the plot
+                     label = "p.signif", label.x.npc = "center", size = 12) +
+  scale_fill_manual(values = c("< 72 hours" = "#e997ae", 
+                               "72 or more hours" = "#c84268")) +
+  scale_x_discrete(labels = c("<72 Hours", "≥72 Hours")) +
+  # Adding padding y axis 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.3, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Categorized Hours") +
+  labs(title= "ECBQ: Effortful Control\nTwo-Group Comparison",
+       subtitle= "(p = 0.016)")
+  
+figure5_ecbq_effco
+
+
+
+
+
+figure5_ecbq_effco_scat <- ggplot(long_wk_child_day_ankle_ecbq_effco, aes(x=hours, y=value)) + 
+  geom_point(size= 1.5) + 
+  geom_smooth(method="lm", se=F, size=1.5, color="#c84268", linetype="dashed") +
+  scale_shape_manual(values= c(16)) +
+  #stat_cor(method = "spearman", label.x=c(3,5), label.y=c(0.7,0.75), size=10, face="bold") + 
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.3, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Attribute Scale") +
+  xlab("Total Daytime Hours") + 
+  labs(title= "ECBQ: Effortful Control\nCorrelation",
+    subtitle= "(rho = -0.2, p = 0.041)")
+
+
+figure5_ecbq_effco_scat
+
+
+
+#figures combined
+
+#combine the FOUR plots to make final figure 
+figure5 <-  figure5_biq_nov + figure5_biq_soc + figure5_biq_tot + figure5_ecbq_effco + figure5_biq_nov_scat + figure5_biq_soc_scat + figure5_biq_tot_scat + figure5_ecbq_effco_scat + plot_annotation(tag_levels = "a", tag_prefix = "(", tag_suffix = ")") +
+  plot_layout(ncol=4, heights = c(2, 1)) &
+  theme(plot.tag = element_text(size = 18, face = "bold"))
+  
+figure5
+
+jpeg("2_OutputGraphs/figure5.jpeg",
+    width = 16, height = 9, units="in", res=1200)
+figure5
+invisible(dev.off())
+
+
+```
+
+
+
+boxplot of age (supp figure 1)
+```{r}
+
+# wrist boxplot with wear time category (x) by age (y)
+figure_age_wrist <- ggplot(demo_weartime_wrist, aes(x=cat6day, y=age, fill=cat6day)) + 
+  geom_boxplot(outlier.shape = NA, lwd=1, alpha=1) +
+  geom_jitter(size=1.5, position = position_jitterdodge(0.2)) +
+  stat_compare_means(method = "wilcox.test",
+                     # Changing the value to asterisks and moving to the middle of the plot
+                     label = "p.signif", label.x.npc = "center", size = 12) +
+  scale_fill_manual(values = c("< 72 hours" = "#A6CAED", 
+                               "72 or more hours" = "#6699CC")) +
+  scale_x_discrete(labels = c("<72 Hours", "≥72 Hours")) +
+  # Adding padding y axis 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.3, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Child Age (months)") +
+  xlab("Categorized Hours")
+  
+
+figure_age_wrist
+
+wilcox_age_wrist <- wilcox.test(age ~ cat6day, data= demo_weartime_wrist)
+formatted_p_value <- format.pval(wilcox_age_wrist$p.value, digits = 3)
+print(formatted_p_value)
+
+# ankle boxplot with wear time category (x) by age (y)
+
+figure_age_ankle <- ggplot(demo_weartime_ankle, aes(x=cat6day, y=age, fill=cat6day)) + 
+  geom_boxplot(outlier.shape = NA, lwd=1, alpha=1) +
+  geom_jitter(size=1.5, position = position_jitterdodge(0.2)) +
+  #stat_compare_means(method = "wilcox.test",                                                       ## removed to not have the "ns" showing
+                     # Changing the value to asterisks and moving to the middle of the plot
+                     #label = "p.signif", label.x.npc = "center", size = 12) +
+  scale_fill_manual(values = c("< 72 hours" = "#acdaa6", 
+                               "72 or more hours" = "#387830")) +
+  scale_x_discrete(labels = c("<72 Hours", "≥72 Hours")) +
+  # Adding padding y axis 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  theme_classic() +
+  theme(axis.text=element_text(size=14, color = "black"), 
+        axis.text.x=element_text(vjust=-1),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 7, b=0, l=0)),
+        
+        axis.line.x=element_blank(), 
+        axis.line.y=element_blank(),
+        
+        axis.title=element_text(size=16, face="bold", color = "black"),
+        axis.title.x=element_text(vjust=-3), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 10, b=0, l=0)),
+        
+        title=element_text(size=14),
+        plot.title=element_text(vjust=5, hjust=0.5, face="bold"),
+        #plot.title.position="plot",
+        subtitle=element_markdown(),
+        plot.subtitle=element_text(vjust=1, hjust=1, size=14), 
+        
+        plot.margin= unit(c(0.3, 0.3, 0.3, 0.3), "inches"), 
+        panel.border = element_rect(color = "black", fill=NA, linewidth=1.5),
+        legend.position= "none") +
+  ylab("Child Age (months)") +
+  xlab("Categorized Hours")
+  
+
+figure_age_ankle
+
+
+supp_figure1 <-  figure_age_wrist + figure_age_ankle + plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 18, face = "bold"))
+
+supp_figure1
+
+jpeg("2_OutputGraphs/supp_figure1.jpeg",
+    width = 10, height = 5, units="in", res=1200)
+supp_figure1
+invisible(dev.off())
+
+```
+
+
+
+
+cleaned figure, not in manuscript
+scatter plots of female and male wrist (x) by ankle (y) weartime 
+```{r}
+
+#individual plots for figure 
+
+# female
+scat_f <- ggplot(demo_weartime_female, aes(x=wrist_hours, y=ankle_hours, shape=sex)) + 
+  geom_point(size= 24) + 
+  geom_smooth(method="lm", se=F, size=7)+
+  scale_shape_manual(values= c(15)) +
+  #labs(title= "Figure 2") +
+  ylab("Ankle Daytime Hours") +
+  xlab("Wrist Daytime Hours") + 
+  labs(title= "(A) Female") +
+  stat_cor(method = "spearman", label.x=c(3,5), label.y=c(30,35), size=40, fontface="bold") + 
+  theme_classic() +
+  theme(axis.text=element_text(size=100, face="bold", color = "black"), 
+        axis.title=element_text(size=110, face="bold", color = "black"),
+        axis.text.x=element_text(vjust=-1),
+        axis.title.x=element_text(vjust=-1.5), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 50, b=0, l=0)),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 30, b=0, l=0)),
+        axis.line=element_line((size=10), color="black"),
+        title=element_text(size=100, face="bold"),
+        plot.title=element_text(vjust=2), 
+        legend.title=element_text(size=100),
+        legend.text=element_text(size=100), 
+        plot.margin= unit(c(1.5, 1.5, 1.5, 1.5), "inches"), 
+        legend.position= "none",
+        panel.border = element_rect(color = "black", fill=NA, linewidth=10))
+
+scat_f
+
+#jpeg("2_OutputGraphs/raw/scat_f.jpeg",
+#    width = 2400, height = 2400)
+#scat_f
+#invisible(dev.off())
+
+
+
+# male
+scat_m <- ggplot(demo_weartime_male, aes(x=wrist_hours, y=ankle_hours, shape=sex)) + 
+  geom_point(size= 24) + 
+  geom_smooth(method="lm", se=F, size=7)+
+  scale_shape_manual(values= c(16)) +
+  #labs(title= "Figure 2") +
+  ylab("Ankle Daytime Hours") +
+  xlab("Wrist Daytime Hours") + 
+  labs(title= "(B) Male") +
+  stat_cor(method = "spearman", label.x=c(3,5), label.y=c(30,35), size=40, face="bold") + 
+  theme_classic() +
+  theme(axis.text=element_text(size=100, face="bold", color = "black"), 
+        axis.title=element_text(size=110, face="bold", color = "black"),
+        axis.text.x=element_text(vjust=-1),
+        axis.title.x=element_text(vjust=-1.5), 
+        axis.title.y=element_text(margin= ggplot2::margin(t=0, r= 50, b=0, l=0)),
+        axis.text.y=element_text(margin= ggplot2::margin(t=0, r= 30, b=0, l=0)),
+        axis.line=element_line((size=10), color="black"),
+        title=element_text(size=100, face="bold"),
+        plot.title=element_text(vjust=2), 
+        legend.title=element_text(size=100),
+        legend.text=element_text(size=100), 
+        plot.margin= unit(c(1.5, 1.5, 1.5, 1.5), "inches"), 
+        legend.position= "none",
+        panel.border = element_rect(color = "black", fill=NA, linewidth=10))
+
+scat_m
+
+#jpeg("2_OutputGraphs/raw/scat_m.jpeg",
+#    width = 2400, height = 2400)
+#scat_m
+#invisible(dev.off())
+
+#combine the two plots to make final figure 
+scatter_bysex <- scat_f + scat_m +
+  #plot_layout(widths = c(3, 1)) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 18, face = "bold"))
+  
+scatter_bysex
+
+
+```
+
+
+
+package citations to add to endnote for the manuscript
+```{r}
+
+citation("openxlsx") # for reading and writing out files
+citation("table1") # for making tables
+citation("tidyverse") # for data organization and manipulation
+citation("ggpubr") 
+citation("rstatix")
+citation("ltm") # cronbach's alpha
+citation("FSA") # dunns test
+citation("patchwork")
+
+```
+
